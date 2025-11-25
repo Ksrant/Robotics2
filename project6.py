@@ -42,6 +42,9 @@ add_bodies = True  # If True: add ground and a box to the scene
 model_path = os.path.join(
     "..", "models", "descriptions", "project_06_TAMP.sdf"
 )
+robot_path = os.path.join(
+    "..", "models", "descriptions", "robots", "arms", "franka_description", "urdf", "panda_arm_hand.urdf"
+)
 
 
 def plot_transient_response(logger_state, simulator_context, desired_positions, num_joints=9):
@@ -127,6 +130,8 @@ class Controller(LeafSystem):
         # Evaluate the input ports
         self.q_d = self._desired_state_port.Eval(context)
         self.q = self._current_state_port.Eval(context)
+        print(self.q.size())
+        print(num_positions)
 
         # Compute gravity forces for the current state
         self.plant_context_ad.SetDiscreteState(self.q)
@@ -220,28 +225,27 @@ def create_sim_scene(sim_time_step):
 
     # Add a MultibodyPlant (for physics) and a SceneGraph (for geometry/visualization)
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=sim_time_step)
-    #Set up a multibodyplant and register to the scene
-    #Time step: decides if we have a discrete or continuous plant(nonzero=discrete,zero=cont)
-
-
-    # Load the Panda robot from URDF
-    panda_model = Parser(plant).AddModelsFromUrl("file://" + os.path.abspath(model_path))[0]
-
-    # Fix the Panda base to the world so it doesn’t fall
-    #base_link = plant.GetBodyByName("panda_link0")
+    robot, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=sim_time_step)
+    # Create a parser to load robot models
+    parser = Parser(plant)
+    robotparser = Parser(robot)
+    # Load the robot model from the specified URDF file
+    parser.AddModelsFromUrl("file://" + os.path.abspath(model_path))
+    robotparser.AddModelsFromUrl("file://" + os.path.abspath(robot_path))
+    # Access the base link (root body) of the Panda robot.
+    base_link = robot.GetBodyByName("panda_link0")
+    # Weld (fix) the robot’s base frame to the world frame.
+    # This prevents the robot from moving as a free-floating body.
     #plant.WeldFrames(plant.world_frame(), base_link.body_frame())
-
-    # ----------------------------------------------------------------
-    # Extra bodies (floor + box) if requested
-    # ----------------------------------------------------------------
-
     plant.Finalize()
-    #plant.SetDefaultPositions([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0, 0.0])
+    robot.Finalize()
+    robot.SetDefaultPositions([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0, 0.0])
     #print(plant.GetDefaultPositions())
     # Create a default Context for the MultibodyPlant.
     # The Context stores the current state of the system (positions, velocities, forces, etc.)
     # and provides the workspace where simulation and control computations happen.
     context = plant.CreateDefaultContext()
+    robotcontext = robot.CreateDefaultContext()
     # The panda_hand is the end-effector frame
     frame_E = plant.GetFrameByName("panda_hand")
     
@@ -250,25 +254,25 @@ def create_sim_scene(sim_time_step):
         [0.5, 0.25, 0.155]
     )
     # Solve inverse kinematics to find target joint positions for the desired end-effector pose
-    q_target = solve_ik(plant, context, frame_E, X_WE_desired)
+    q_target = solve_ik(robot, robotcontext, frame_E, X_WE_desired)
     # Add visualization to see the geometries in MeshCat
     AddDefaultVisualization(builder=builder, meshcat=meshcat)
 
     # Add a PD+G controller to regulate the robot
-    controller = builder.AddNamedSystem("PD+G controller", Controller(plant))
+    controller = builder.AddNamedSystem("PD+G controller", Controller(robot))
     
     # Create a constant source for desired positions
     des_pos_system = builder.AddNamedSystem("Desired position", ConstantVectorSource(q_target))
     
     # Connect systems: plant outputs to controller inputs, and vice versa
-    builder.Connect(plant.get_state_output_port(), controller.GetInputPort("Current_state")) 
-    builder.Connect(controller.GetOutputPort("tau_u"), plant.GetInputPort("applied_generalized_force"))
+    builder.Connect(robot.get_state_output_port(), controller.GetInputPort("Current_state")) 
+    builder.Connect(controller.GetOutputPort("tau_u"), robot.GetInputPort("applied_generalized_force"))
     builder.Connect(des_pos_system.get_output_port(), controller.GetInputPort("Desired_state"))
 
     # Create a logger to record the robot's state over time.
     # 'plant.get_state_output_port()' outputs all state variables (positions + velocities).
     # LogVectorOutput connects this output to a logger system so we can access data later.
-    logger_state = LogVectorOutput(plant.get_state_output_port(), builder)
+    logger_state = LogVectorOutput(robot.get_state_output_port(), builder)
     # Give the logger a descriptive name (useful for visualization or debugging).
     logger_state.set_name("State logger")
 
