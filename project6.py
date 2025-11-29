@@ -19,7 +19,7 @@ from pydrake.systems.framework import LeafSystem
 from pydrake.systems.primitives import ConstantVectorSource, LogVectorOutput
 from pydrake.all import Variable, MakeVectorVariable
 
-from helper.dynamics import CalcRobotDynamics
+#from helper.dynamics import CalcRobotDynamics
 from pydrake.all import (
     InverseKinematics,
     Solve,
@@ -40,7 +40,7 @@ add_bodies = True  # If True: add ground and a box to the scene
 
 #Path to the robot we want to use
 model_path = os.path.join(
-    "..", "models", "descriptions", "project_06_TAMP.sdf"
+    "..", "models", "project", "project_06_TAMP.sdf"
 )
 robot_path = os.path.join(
     "..", "models", "descriptions", "robots", "arms", "franka_description", "urdf", "panda_arm_hand.urdf"
@@ -126,13 +126,9 @@ class Controller(LeafSystem):
     def compute_tau_u(self, context, discrete_state):
         num_positions = self.plant.num_positions()
         num_velocities = self.plant.num_velocities()
-
         # Evaluate the input ports
         self.q_d = self._desired_state_port.Eval(context)
         self.q = self._current_state_port.Eval(context)
-        print(self.q.size())
-        print(num_positions)
-
         # Compute gravity forces for the current state
         self.plant_context_ad.SetDiscreteState(self.q)
         gravity = -self.plant.CalcGravityGeneralizedForces(self.plant_context_ad)      
@@ -225,20 +221,27 @@ def create_sim_scene(sim_time_step):
 
     # Add a MultibodyPlant (for physics) and a SceneGraph (for geometry/visualization)
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=sim_time_step)
-    robot, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=sim_time_step)
-    # Create a parser to load robot models
     parser = Parser(plant)
+    parser.AddModelsFromUrl("file://" + os.path.abspath(model_path))
+    plant.Finalize()
+
+
+    robot = MultibodyPlant(time_step=sim_time_step)
+    # Create a parser to load robot models
     robotparser = Parser(robot)
     # Load the robot model from the specified URDF file
-    parser.AddModelsFromUrl("file://" + os.path.abspath(model_path))
     robotparser.AddModelsFromUrl("file://" + os.path.abspath(robot_path))
     # Access the base link (root body) of the Panda robot.
     base_link = robot.GetBodyByName("panda_link0")
     # Weld (fix) the robot’s base frame to the world frame.
     # This prevents the robot from moving as a free-floating body.
-    #plant.WeldFrames(plant.world_frame(), base_link.body_frame())
-    plant.Finalize()
+    robot.WeldFrames(robot.world_frame(), base_link.body_frame())
+    robot = builder.AddSystem(robot)
     robot.Finalize()
+    
+    print(plant.num_positions())
+    print(robot.num_positions())
+
     robot.SetDefaultPositions([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0, 0.0])
     #print(plant.GetDefaultPositions())
     # Create a default Context for the MultibodyPlant.
@@ -247,14 +250,15 @@ def create_sim_scene(sim_time_step):
     context = plant.CreateDefaultContext()
     robotcontext = robot.CreateDefaultContext()
     # The panda_hand is the end-effector frame
-    frame_E = plant.GetFrameByName("panda_hand")
+    frame_E = robot.GetFrameByName("panda_hand")
     
     X_WE_desired = RigidTransform(
-        RollPitchYaw(0, 0, 0),
-        [0.5, 0.25, 0.155]
+        RollPitchYaw(np.pi/2, 0, 0),
+        [0.6, 0.0, 0.4]
     )
     # Solve inverse kinematics to find target joint positions for the desired end-effector pose
     q_target = solve_ik(robot, robotcontext, frame_E, X_WE_desired)
+    print("Target joint positions from IK:", q_target)
     # Add visualization to see the geometries in MeshCat
     AddDefaultVisualization(builder=builder, meshcat=meshcat)
 
@@ -279,7 +283,7 @@ def create_sim_scene(sim_time_step):
 
     # Build the final diagram (plant + scene graph + viz)
     diagram = builder.Build()
-    return diagram
+    return diagram, logger_state, q_target
 
 def run_simulation(sim_time_step):
     """
