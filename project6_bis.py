@@ -39,16 +39,7 @@ world_path = os.path.join("..", "models", "descriptions", "project_06_TAMP.sdf")
 robot_path = os.path.join("..", "models", "descriptions", "robots", "arms",
                           "franka_description", "urdf", "panda_arm_hand.urdf")
 
-def make_panda(panda_path,time_step):
-    plant = MultibodyPlant(time_step)
-    parser = Parser(plant)
-    parser.AddModelsFromUrl("file://" + os.path.abspath(panda_path))
-  
-    base = plant.GetBodyByName("panda_link0")
-    plant.WeldFrames(plant.world_frame(), base.body_frame())
-    
-    plant.Finalize()
-    return plant
+
 
 ######################################################################################################
 #                             ########Define PD+G Controller as a LeafSystem #######   
@@ -402,6 +393,17 @@ def plot_joint_tracking(logger_state, logger_traj, simulator_context, num_joints
     fig.suptitle('Joint Positions: Actual vs Reference')
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     plt.show()
+
+def make_panda(panda_path,time_step):
+    plant = MultibodyPlant(time_step)
+    parser = Parser(plant)
+    parser.AddModelsFromUrl("file://" + os.path.abspath(panda_path))
+  
+    base = plant.GetBodyByName("panda_link0")
+    plant.WeldFrames(plant.world_frame(), base.body_frame())
+    
+    plant.Finalize()
+    return plant
 
 def solve_ik(plant, context, frame_E, X_WE_desired):
     """
