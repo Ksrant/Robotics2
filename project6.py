@@ -54,8 +54,8 @@ class Controller(LeafSystem):
         self._desired_state_port = self.DeclareVectorInputPort(name="Desired_state", size=9)
 
         # PD+G gains (Kp and Kd)
-        self.Kp_ = np.array([120.0, 120.0, 120.0, 100.0, 50.0, 45.0, 15.0, 120, 120])
-        self.Kd_ = np.array([8.0, 8.0, 8.0, 5.0, 2.0, 2.0, 2.0, 5, 5])
+        self.Kp_ = np.array([120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120, 120])
+        self.Kd_ = np.array([30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 5, 5])
         self.robot = robot
 
         # Store plant and context for dynamics calculations
@@ -82,7 +82,7 @@ class Controller(LeafSystem):
         gravity = -self.plant.CalcGravityGeneralizedForces(self.plant_context_ad)[:num_positions]
         
         tau = self.Kp_ * (self.q_d - self.q[:num_positions]) - self.Kd_ * self.q[num_positions:] + gravity
-
+        #print(tau)
         # Update the output port = state
         discrete_state.get_mutable_vector().SetFromVector(tau)
 
@@ -471,6 +471,16 @@ def solve_ik(plant, context, frame_E, X_WE_desired):
         print("IK did not converge!")
         return None
 
+def get_cube_poses(plant, context):
+    cubes = ["red_link", "green_link", "blue_link"]
+    poses = {}
+
+    for link_name in cubes:
+        body = plant.GetBodyByName(link_name)
+        X_WB = plant.EvalBodyPoseInWorld(context, body)
+        poses[link_name] = X_WB
+
+    return poses
 
 # Function to Create Simulation Scene
 def create_sim_scene(sim_time_step):   
@@ -487,12 +497,21 @@ def create_sim_scene(sim_time_step):
 
     
     plant.Finalize()
+
+
     box = plant.GetModelInstanceByName("table_source")
     robot = plant.GetModelInstanceByName("panda")
     # Set the initial joint position of the robot otherwise it will correspond to zero positions
     q_start = [-1.0, -0, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0, 0.0]
     plant.SetDefaultPositions(robot, q_start)
     print(plant.GetDefaultPositions())
+
+    
+    cube_poses = get_cube_poses(plant,plant.CreateDefaultContext())
+
+    #print("Red cube:", cube_poses["red_link"].rotation())
+    #print("Green cube:", cube_poses["green_link"].rotation())
+    #print("Blue cube:", cube_poses["blue_link"].rotation())
 
 
     # Add visualization to see the geometries in MeshCat
@@ -506,13 +525,19 @@ def create_sim_scene(sim_time_step):
     panda_ik.SetDefaultPositions([-1.0, -0, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0, 0.0])
     context_panda_ik = panda_ik.CreateDefaultContext()
     frame_E = panda_ik.GetFrameByName("panda_hand")
-    X_WE_desired = RigidTransform(
-        RollPitchYaw(np.pi, 0, 0),
-        [0.4, 0.3, 0.1]
-    )
+
+
+
     
+    X_WE_desired = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
+    #X_WE_desired = RigidTransform(cube_poses["red_link"].rotation(),cube_poses["red_link"].translation())
+    print(X_WE_desired)
+
     q_target = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired)
     print(q_target)
+    q_target[7] = 0.04
+    q_target[8] = 0.04
+    
     #q_target = [ 2.5, -0.31, -2.03, -2.36, -0.44, 2.46, 2.67, 0.0, 0.0]
     path_planner = builder.AddNamedSystem(
         "Motion Profile",
@@ -555,11 +580,12 @@ def run_simulation(sim_time_step):
     
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(10.0)  # Adjust this time as needed
+    simulator.AdvanceTo(25.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
     plot_joint_tracking(logger_state, logger_traj, simulator.get_context())
 
 # Run the simulation with a specific time step. Try gradually increasing it!
-run_simulation(sim_time_step=0.01)
+run_simulation(sim_time_step=0.001)
+
