@@ -54,8 +54,8 @@ class Controller(LeafSystem):
         self._desired_state_port = self.DeclareVectorInputPort(name="Desired_state", size=9)
 
         # PD+G gains (Kp and Kd)
-        self.Kp_ = np.array([120.0, 120.0, 120.0, 100.0, 50.0, 45.0, 15.0, 120, 120])
-        self.Kd_ = np.array([8.0, 8.0, 8.0, 5.0, 2.0, 2.0, 2.0, 5, 5])
+        self.Kp_ = np.array([120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120, 120])
+        self.Kd_ = np.array([30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 5, 5])
         self.robot = robot
 
         # Store plant and context for dynamics calculations
@@ -82,7 +82,7 @@ class Controller(LeafSystem):
         gravity = -self.plant.CalcGravityGeneralizedForces(self.plant_context_ad)[:num_positions]
         
         tau = self.Kp_ * (self.q_d - self.q[:num_positions]) - self.Kd_ * self.q[num_positions:] + gravity
-
+        #print(tau)
         # Update the output port = state
         discrete_state.get_mutable_vector().SetFromVector(tau)
 
@@ -107,7 +107,7 @@ class MotionProfile(LeafSystem):
         self.num_points = 40
         time_period = 3.0
         self.index = 0
-        self.flag = True
+        #self.flag = True
         self.min_distance = 0.05
         update_period = time_period / self.num_points
         builder = DiagramBuilder()
@@ -117,51 +117,79 @@ class MotionProfile(LeafSystem):
         base_link = plant.GetBodyByName("panda_link0")
         plant.WeldFrames(plant.world_frame(), base_link.body_frame())
 
-        # --- A floating box ---
-        # Add a model instance for the box
-        box_model = plant.AddModelInstance("box")
+        
+        # --- Table ---
+        table_model = plant.AddModelInstance("table_source")
 
-        # Define mass and inertia for the box
-        box_inertia = SpatialInertia(
-            mass=0.5,                          # kg
-            p_PScm_E=np.zeros(3),              # center of mass at the body origin
-            G_SP_E=UnitInertia(0.01, 0.01, 0.01)  # simple rotational inertia
+        table_inertia = SpatialInertia(
+            mass=5.0,  
+            p_PScm_E=np.zeros(3),
+            G_SP_E=UnitInertia(0.01, 0.01, 0.01)
         )
-        box = plant.AddRigidBody("Box", box_model, box_inertia)
+        table_body = plant.AddRigidBody("table_top_link", table_model, table_inertia)
 
-        # Define box shape (10cm cube)
-        box_shape = DrakeBox(0.4, 0.05, 0.4)
-
-        # Add collision geometry to the box
+        table_shape = DrakeBox(0.4, 0.75, 0.05)
         plant.RegisterCollisionGeometry(
-            box,
-            RigidTransform(),   # Pose relative to the box frame
-            box_shape,
-            "box_collision",
-            CoulombFriction(0.9, 0.8)
+            table_body,
+            RigidTransform(),  
+            table_shape,
+            "table_collision",
+            CoulombFriction(0.3, 0.3)
+        )
+        plant.RegisterVisualGeometry(
+            table_body,
+            RigidTransform(),
+            table_shape,
+            "table_visual",
+            [0.82, 0.71, 0.55, 1.0]  
         )
 
-        # Add visual geometry to the box
-        plant.RegisterVisualGeometry(
-            box,
-            RigidTransform(),
-            box_shape,
-            "box_visual",
-            [0.8, 0.2, 0.2, 1.0]  # red color
+        table_pose = RigidTransform([0.55, 0.0, 0.025])
+        plant.WeldFrames(plant.world_frame(), table_body.body_frame(), table_pose)
+
+        # --- Wall ---
+        wall_model = plant.AddModelInstance("wall")
+
+        wall_inertia = SpatialInertia(
+            mass=2.0,
+            p_PScm_E=np.zeros(3),
+            G_SP_E=UnitInertia(0.01, 0.01, 0.01)
         )
-        box_pose = RigidTransform([0.6, 0.0, 0.3])
-        plant.WeldFrames(plant.world_frame(), box.body_frame(), box_pose)
+        wall_body = plant.AddRigidBody("wall_top_link", wall_model, wall_inertia)
+
+        wall_shape = DrakeBox(0.35, 0.02, 0.3)
+        plant.RegisterCollisionGeometry(
+            wall_body,
+            RigidTransform(),
+            wall_shape,
+            "wall_collision",
+            CoulombFriction(0.3, 0.3)
+        )
+        plant.RegisterVisualGeometry(
+            wall_body,
+            RigidTransform(),
+            wall_shape,
+            "wall_visual",
+            [0.92, 0.51, 0.55, 1.0]  
+        )
+
+        wall_pose = RigidTransform([0.55, 0.0, 0.2])
+        plant.WeldFrames(plant.world_frame(), wall_body.body_frame(), wall_pose)
+
+
         plant.Finalize()
         diagram = builder.Build()
         diagram_context = diagram.CreateDefaultContext()
         self.plant_context = diagram.GetMutableSubsystemContext(plant, diagram_context)
         self.plant = plant
         self.diagram = diagram
-        self.box = plant.GetModelInstanceByName("box")
+        self.table = plant.GetModelInstanceByName("table_source")
+        self.wall  = plant.GetModelInstanceByName("wall")
         self.robot = plant.GetModelInstanceByName("panda")
         self.num_positions = self.plant.num_positions(self.robot)
-        self._q_desired_port = self.DeclareVectorInputPort(name="q_desired", size=self.num_positions)
+        self._q_desired_port = self.DeclareVectorInputPort("q_desired", size=self.num_positions)
         self._state_port = self.DeclareVectorInputPort(name="state", size=2*self.num_positions)
+        self.last_q_desired = None
 
         q_ctrl = self.DeclareDiscreteState(self.num_positions)
         self.DeclareStateOutputPort("q_ctrl", q_ctrl)
@@ -200,17 +228,38 @@ class MotionProfile(LeafSystem):
         # Update the plant’s internal configuration for accurate collision checking
         self.plant.SetPositions(self.plant_context, q_i)
 
-        if self.flag:
+        # Check if desired changed significantly
+        if self.last_q_desired is None or np.linalg.norm(q_desired - self.last_q_desired) > 1e-3 or q_desired[7] != self.last_q_desired[7] :
+            # recompute path
+            self.path = self.plan_joint_space(q_i, q_desired, timeout=4)
+            if self.path is None:
+                self.path = q_i[np.newaxis, :]
+            self.index = 0
+            self.last_q_desired = q_desired.copy()  # store last desired
+
             # Run OMPL’s RRT-Connect planner to compute a joint-space path
             self.path = self.plan_joint_space(q_i, q_desired, timeout=4)
 
-            # If planner fails, fall back to holding the current position
+                # If planner fails, fall back to holding the current position
             if self.path is None:
                 self.path = q_i[np.newaxis, :]
-            
+                
             self.index = 0
-            self.flag = False
+            #self.flag = False
 
+
+            """
+            if self.flag:
+                # Run OMPL’s RRT-Connect planner to compute a joint-space path
+                self.path = self.plan_joint_space(q_i, q_desired, timeout=4)
+
+                # If planner fails, fall back to holding the current position
+                if self.path is None:
+                    self.path = q_i[np.newaxis, :]
+                
+                self.index = 0
+                self.flag = False
+            """
         # If a valid path exists, follow it step by step 
         if self.path is not None and len(self.path) > self.index:
             # Select the next waypoint on the planned path
@@ -394,6 +443,173 @@ def plot_joint_tracking(logger_state, logger_traj, simulator_context, num_joints
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     plt.show()
 
+def make_panda_ik(panda_path,time_step):
+    plant = MultibodyPlant(time_step)
+    parser = Parser(plant)
+    parser.AddModelsFromUrl("file://" + os.path.abspath(panda_path))
+  
+    base = plant.GetBodyByName("panda_link0")
+    plant.WeldFrames(plant.world_frame(), base.body_frame())
+    
+    plant.Finalize()
+    return plant
+
+def solve_ik(plant, context, frame_E, X_WE_desired):
+    """
+    Solves inverse kinematics for a given end-effector pose.
+
+    Args:
+        plant: MultibodyPlant
+        context: plant.CreateDefaultContext() or similar
+        frame_E: End-effector Frame (e.g. plant.GetFrameByName("ee"))
+        X_WE_desired: RigidTransform of desired world pose of end-effector
+
+    Returns:
+        q_solution: numpy array of joint positions if successful, else None
+    """
+    ik = InverseKinematics(plant, context)
+
+    # Set nominal joint positions to current positions
+    q_nominal = plant.GetPositions(context).reshape((-1, 1))
+
+    
+    # Constrain position and orientation
+    # Position constraint
+    p_AQ = X_WE_desired.translation().reshape((3, 1))
+    ik.AddPositionConstraint(
+        frameB=frame_E,
+        p_BQ=np.zeros((3, 1)),  # Here, p_BQ = [0, 0, 0] means we’re constraining the origin of the E frame.
+        frameA=plant.world_frame(),
+        p_AQ_lower=p_AQ,
+        p_AQ_upper=p_AQ
+    )
+
+    # Orientation constraint
+    theta_bound = 1e-2  # radians
+    ik.AddOrientationConstraint(
+        frameAbar=plant.world_frame(),      # world frame
+        R_AbarA=X_WE_desired.rotation(),    # desired orientation
+        frameBbar=frame_E,                  # end-effector frame
+        R_BbarB=RotationMatrix(),           # current orientation
+        theta_bound=theta_bound             # allowable deviation
+    )
+
+    # Access the underlying MathematicalProgram to add costs and constraints manually.
+    prog = ik.prog()
+    q_var = ik.q()  # decision variables (joint angles)
+    # Add a quadratic cost to stay close to the nominal configuration:
+    #   cost = (q - q_nominal)^T * W * (q - q_nominal)
+    W = np.identity(q_nominal.shape[0])
+    prog.AddQuadraticErrorCost(W, q_nominal, q_var)
+
+    # Enforce joint position limits from the robot model.
+    lower = plant.GetPositionLowerLimits()
+    upper = plant.GetPositionUpperLimits()
+    prog.AddBoundingBoxConstraint(lower, upper, q_var)
+
+
+    # Solve the optimization problem using Drake’s default solver.
+    # The initial guess is the nominal configuration (q_nominal).
+    result = Solve(prog, q_nominal)
+
+    # Check if the solver succeeded and return the solution.
+    if result.is_success():
+        q_sol = result.GetSolution(q_var)
+        return q_sol
+    else:
+        print("IK did not converge!")
+        return None
+
+def get_cube_poses(plant, context):
+    cubes = ["red_link", "green_link", "blue_link"]
+    poses = {}
+
+    for link_name in cubes:
+        body = plant.GetBodyByName(link_name)
+        X_WB = plant.EvalBodyPoseInWorld(context, body)
+        poses[link_name] = X_WB
+
+    return poses
+
+
+class TAMPSequencer(LeafSystem):
+
+    def __init__(self, waypoints, planner_function, delay=2.0):
+        """
+        waypoints : [[q1], [q2], ..., [qn]]
+        planner_function : fonction interne (ex: motion_profile.plan_joint_space)
+        delay : temps d’attente entre deux trajectoires
+        """
+        super().__init__()
+
+        self.waypoints = waypoints
+        self.planner = planner_function   # <-- ta fonction interne existante
+        self.delay = delay
+
+        # liste de sous-listes :
+        # [ traj(q1->q2), traj(q2->q3), ... ]
+        self.paths = []
+
+        # ---- Compute all trajectories BEFORE simulation ----
+        print("[Sequencer] Computing all trajectories...")
+        for i in range(len(waypoints)-1):
+            q_start = waypoints[i]
+            q_goal  = waypoints[i+1]
+
+            traj = self.planner(q_start, q_goal)   # <-- TA fonction
+            if traj is None:
+                raise RuntimeError("Planner failed between waypoint {} and {}".format(i,i+1))
+
+            self.paths.append(traj)   # <--- sous-liste
+            print(f"[Sequencer] traj {i}: {len(traj)} points")
+
+        # For streaming
+        self.current_path = 0      # index de la sous-liste
+        self.current_index = 0     # index du point dans la sous-liste
+        self.wait_timer = 0.0
+
+        nq = len(waypoints[0])
+        self.DeclareVectorOutputPort("q_d", nq, self.CalcOutput)
+
+        self.dt = 0.01
+        self.DeclarePeriodicDiscreteUpdateEvent(
+            period_sec=self.dt,
+            offset_sec=0.0,
+            update=self.Update
+        )
+
+    def Update(self, context, discrete_state):
+        # If all paths sent → stay at last point
+        if self.current_path >= len(self.paths):
+            return
+
+        path = self.paths[self.current_path]
+
+        # If reached end of sub-list → wait
+        if self.current_index >= len(path):
+            if self.wait_timer <= 0:
+                self.wait_timer = self.delay        # start delay
+            else:
+                self.wait_timer -= self.dt
+                if self.wait_timer <= 0:
+                    self.current_path += 1          # next trajectory
+                    self.current_index = 0
+            return
+
+        # Else: send next point
+        self.current_index += 1
+
+    def CalcOutput(self, context, output):
+        # If all trajectories done: output last config
+        if self.current_path >= len(self.paths):
+            output.SetFromVector(self.paths[-1][-1])
+            return
+
+        path = self.paths[self.current_path]
+        idx = min(self.current_index, len(path)-1)
+
+        output.SetFromVector(path[idx])
+
 
 # Function to Create Simulation Scene
 def create_sim_scene(sim_time_step):   
@@ -410,12 +626,21 @@ def create_sim_scene(sim_time_step):
 
     
     plant.Finalize()
-    box = plant.GetModelInstanceByName("table_source")
+
+
+    
     robot = plant.GetModelInstanceByName("panda")
     # Set the initial joint position of the robot otherwise it will correspond to zero positions
     q_start = [-1.0, -0, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0, 0.0]
     plant.SetDefaultPositions(robot, q_start)
-    print(plant.GetDefaultPositions())
+    #print(plant.GetDefaultPositions())
+
+    
+    cube_poses = get_cube_poses(plant,plant.CreateDefaultContext())
+
+    #print("Red cube:", cube_poses["red_link"].rotation())
+    #print("Green cube:", cube_poses["green_link"].rotation())
+    #print("Blue cube:", cube_poses["blue_link"].rotation())
 
 
     # Add visualization to see the geometries in MeshCat
@@ -425,20 +650,52 @@ def create_sim_scene(sim_time_step):
     controller = builder.AddNamedSystem("PD+G controller", Controller(plant, robot))
     
     # Create a constant source for desired positions
-    q_target = [ 2.5, -0.31, -2.03, -2.36, -0.44, 2.46, 2.67, 0.0, 0.0]
-    path_planner = builder.AddNamedSystem(
-        "Motion Profile",
-        MotionProfile(trajInit_=q_start)
-    )
-    des_pos = builder.AddNamedSystem("Desired position", ConstantVectorSource(q_target))
+    panda_ik = make_panda_ik(panda_path=robot_path,time_step=sim_time_step)
+    panda_ik.SetDefaultPositions([-1.0, -0, 0.0, -2.356, 0.0, 1.571, 0.785, 0.0, 0.0])
+    context_panda_ik = panda_ik.CreateDefaultContext()
+    frame_E = panda_ik.GetFrameByName("panda_hand")
+
+
+    X_WE_desired_1 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5,-0.25, 0.22])
+    X_WE_desired_2 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
+    X_WE_desired_3 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, -0.25, 0.70])
+    X_WE_desired_4 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
     
+    #X_WE_desired = RigidTransform(cube_poses["red_link"].rotation(),cube_poses["red_link"].translation())
+    #print(X_WE_desired)
+
+    q_target_1 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_1) 
+    q_target_1[7] = 0.04
+    q_target_1[8] = 0.04
+    q_target_2 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_2)
+    q_target_2[7] = 0.04
+    q_target_2[8] = 0.04
+    q_target_3 = q_target_2.copy()
+    q_target_3[7] = 0.0000
+    q_target_3[8] = 0.0000
+    q_target_4 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_3)
+    q_target_4[7] = 0.0000
+    q_target_4[8] = 0.0000
+    q_target_5 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_4) 
+    q_target_5[7] = 0.0001
+    q_target_5[8] = 0.0001
+    sequencer = builder.AddSystem(TAMPSequencer(waypoints=[q_target_1, q_target_2,q_target_3,q_target_4],tolerance=0.08))
+    path_planner = builder.AddNamedSystem("Motion Profile",MotionProfile(trajInit_=q_start))
+
+    
+
+    #des_pos = builder.AddNamedSystem("Desired position", ConstantVectorSource(q_target))
+    
+    
+    builder.Connect(plant.GetOutputPort("panda_state"),sequencer.GetInputPort("state"))
+    builder.Connect(sequencer.get_output_port(0),path_planner.GetInputPort("q_desired"))
+    print(sequencer.get_output_port(0))
     # Connect systems: plant outputs to controller inputs, and vice versa
     builder.Connect(plant.GetOutputPort("panda_state"), controller.GetInputPort("Current_state")) 
     builder.Connect(plant.GetOutputPort("panda_state"), path_planner.GetInputPort("state")) 
     builder.Connect(controller.GetOutputPort("tau_u"), plant.GetInputPort("panda_actuation"))
-    builder.Connect(des_pos.get_output_port(), path_planner.GetInputPort("q_desired"))
+    #builder.Connect(des_pos.get_output_port(), path_planner.GetInputPort("q_desired"))
     builder.Connect(path_planner.get_output_port(0), controller.GetInputPort("Desired_state"))
-
 
     logger_state = LogVectorOutput(plant.GetOutputPort("panda_state"), builder)
     logger_state.set_name("State logger")
@@ -448,11 +705,11 @@ def create_sim_scene(sim_time_step):
 
     # Build and return the diagram
     diagram = builder.Build()
-    return diagram, logger_state, logger_traj, q_target
+    return diagram, logger_state, logger_traj
 
 # Create a function to run the simulation scene and save the block diagram:
 def run_simulation(sim_time_step):
-    diagram, logger_state, logger_traj, q_target = create_sim_scene(sim_time_step)
+    diagram, logger_state, logger_traj = create_sim_scene(sim_time_step)
     simulator = Simulator(diagram)
     simulator_context = simulator.get_mutable_context()
     simulator.Initialize()
@@ -467,11 +724,11 @@ def run_simulation(sim_time_step):
     
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(10.0)  # Adjust this time as needed
+    simulator.AdvanceTo(30.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
     plot_joint_tracking(logger_state, logger_traj, simulator.get_context())
 
 # Run the simulation with a specific time step. Try gradually increasing it!
-run_simulation(sim_time_step=0.01)
+run_simulation(sim_time_step=0.001)
