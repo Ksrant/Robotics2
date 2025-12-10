@@ -101,13 +101,15 @@ class JointSpaceValidityChecker(ob.StateValidityChecker):
         return self.check_fn(q)
 
 class MotionProfile(LeafSystem):
-    def __init__(self, trajInit_):
+    def __init__(self,waypoints):
         super().__init__()
-        self.trajInit_ = trajInit_
+
+        self.waypoints = [np.asarray(w) for w in waypoints]
         self.num_points = 40
         time_period = 3.0
-        self.index = 0
-        #self.flag = True
+        self.index_path = 0
+        self.index_q_next = 0
+        self.flag = True
         self.min_distance = 0.05
         update_period = time_period / self.num_points
         builder = DiagramBuilder()
@@ -121,28 +123,12 @@ class MotionProfile(LeafSystem):
         # --- Table ---
         table_model = plant.AddModelInstance("table_source")
 
-        table_inertia = SpatialInertia(
-            mass=5.0,  
-            p_PScm_E=np.zeros(3),
-            G_SP_E=UnitInertia(0.01, 0.01, 0.01)
-        )
+        table_inertia = SpatialInertia(mass=5.0,  p_PScm_E=np.zeros(3),G_SP_E=UnitInertia(0.01, 0.01, 0.01))
         table_body = plant.AddRigidBody("table_top_link", table_model, table_inertia)
 
         table_shape = DrakeBox(0.4, 0.75, 0.05)
-        plant.RegisterCollisionGeometry(
-            table_body,
-            RigidTransform(),  
-            table_shape,
-            "table_collision",
-            CoulombFriction(0.3, 0.3)
-        )
-        plant.RegisterVisualGeometry(
-            table_body,
-            RigidTransform(),
-            table_shape,
-            "table_visual",
-            [0.82, 0.71, 0.55, 1.0]  
-        )
+        plant.RegisterCollisionGeometry(table_body,RigidTransform(),  table_shape,"table_collision",CoulombFriction(0.3, 0.3))
+        plant.RegisterVisualGeometry(table_body,RigidTransform(),table_shape,"table_visual",[0.82, 0.71, 0.55, 1.0]  )
 
         table_pose = RigidTransform([0.55, 0.0, 0.025])
         plant.WeldFrames(plant.world_frame(), table_body.body_frame(), table_pose)
@@ -150,28 +136,12 @@ class MotionProfile(LeafSystem):
         # --- Wall ---
         wall_model = plant.AddModelInstance("wall")
 
-        wall_inertia = SpatialInertia(
-            mass=2.0,
-            p_PScm_E=np.zeros(3),
-            G_SP_E=UnitInertia(0.01, 0.01, 0.01)
-        )
+        wall_inertia = SpatialInertia(mass=2.0,p_PScm_E=np.zeros(3),G_SP_E=UnitInertia(0.01, 0.01, 0.01))
         wall_body = plant.AddRigidBody("wall_top_link", wall_model, wall_inertia)
 
         wall_shape = DrakeBox(0.35, 0.02, 0.3)
-        plant.RegisterCollisionGeometry(
-            wall_body,
-            RigidTransform(),
-            wall_shape,
-            "wall_collision",
-            CoulombFriction(0.3, 0.3)
-        )
-        plant.RegisterVisualGeometry(
-            wall_body,
-            RigidTransform(),
-            wall_shape,
-            "wall_visual",
-            [0.92, 0.51, 0.55, 1.0]  
-        )
+        plant.RegisterCollisionGeometry(wall_body,RigidTransform(),wall_shape,"wall_collision",CoulombFriction(0.3, 0.3))
+        plant.RegisterVisualGeometry(wall_body,RigidTransform(),wall_shape,"wall_visual",[0.92, 0.51, 0.55, 1.0]  )
 
         wall_pose = RigidTransform([0.55, 0.0, 0.2])
         plant.WeldFrames(plant.world_frame(), wall_body.body_frame(), wall_pose)
@@ -187,18 +157,12 @@ class MotionProfile(LeafSystem):
         self.wall  = plant.GetModelInstanceByName("wall")
         self.robot = plant.GetModelInstanceByName("panda")
         self.num_positions = self.plant.num_positions(self.robot)
-        self._q_desired_port = self.DeclareVectorInputPort("q_desired", size=self.num_positions)
         self._state_port = self.DeclareVectorInputPort(name="state", size=2*self.num_positions)
-        self.last_q_desired = None
 
         q_ctrl = self.DeclareDiscreteState(self.num_positions)
         self.DeclareStateOutputPort("q_ctrl", q_ctrl)
         
-        self.DeclarePeriodicDiscreteUpdateEvent(
-            period_sec= update_period,
-            offset_sec=0.0,
-            update=self.compute_trajectory
-        )
+        self.DeclarePeriodicDiscreteUpdateEvent( period_sec= update_period,offset_sec=0.0,update=self.compute_trajectory)
 
     def compute_trajectory(self, context, discrete_state):
         """
@@ -206,74 +170,60 @@ class MotionProfile(LeafSystem):
         along a collision-free path planned by RRTConnect.
 
         This function is triggered by a discrete update event inside Drake’s
-        simulation loop. It computes a sequence of joint-space waypoints
-        that guide the robot from its current configuration to the desired
-        goal configuration while avoiding obstacles.
-
-        Parameters
-        ----------
-        context : pydrake.systems.framework.Context
-            Provides access to the current simulation time and inputs.
-        discrete_state : pydrake.systems.framework.DiscreteValues
-            The system's internal discrete state vector (used to store q_next).
+        simulation loop. It computes a sequence of joint-space waypoints that
+        guide the robot from its current configuration to the desired goal
+        configuration while avoiding obstacles.
         """
 
-        # q_desired: the desired goal configuration provided by an external node
-        q_desired = self._q_desired_port.Eval(context)
-        # state: the current robot joint positions + velocities
+        # Read current robot state (q + v)
         state = self._state_port.Eval(context)
-
-        # Extract current joint positions
         q_i = state[:self.num_positions]
-        # Update the plant’s internal configuration for accurate collision checking
+
+        # Update plant position for collision checking
         self.plant.SetPositions(self.plant_context, q_i)
 
-        # Check if desired changed significantly
-        if self.last_q_desired is None or np.linalg.norm(q_desired - self.last_q_desired) > 1e-3 or q_desired[7] != self.last_q_desired[7] :
-            # recompute path
-            self.path = self.plan_joint_space(q_i, q_desired, timeout=4)
-            if self.path is None:
-                self.path = q_i[np.newaxis, :]
-            self.index = 0
-            self.last_q_desired = q_desired.copy()  # store last desired
+        # Compute trajectory only once
+        if self.flag:
+            self.trajectorys = self.get_trajectorys(self.waypoints, q_i, 4)
+            self.index_path = 0
+            self.index_q_next = 0
+            self.flag = False
 
-            # Run OMPL’s RRT-Connect planner to compute a joint-space path
-            self.path = self.plan_joint_space(q_i, q_desired, timeout=4)
+        # Default fallback: hold current position (prevents uninitialized q_next)
+        q_next = q_i.copy()
 
-                # If planner fails, fall back to holding the current position
-            if self.path is None:
-                self.path = q_i[np.newaxis, :]
-                
-            self.index = 0
-            #self.flag = False
+        # If trajectories exist, follow them
+        if self.trajectorys is not None:
 
+            # Still inside trajectory list?
+            if self.index_path < len(self.trajectorys):
 
-            """
-            if self.flag:
-                # Run OMPL’s RRT-Connect planner to compute a joint-space path
-                self.path = self.plan_joint_space(q_i, q_desired, timeout=4)
+                path = self.trajectorys[self.index_path]
 
-                # If planner fails, fall back to holding the current position
-                if self.path is None:
-                    self.path = q_i[np.newaxis, :]
-                
-                self.index = 0
-                self.flag = False
-            """
-        # If a valid path exists, follow it step by step 
-        if self.path is not None and len(self.path) > self.index:
-            # Select the next waypoint on the planned path
-            q_next = self.path[self.index]
+                # Still waypoints inside this path?
+                if self.index_q_next < len(path):
 
-            # Advance to the next waypoint if we are close enough to the current one
-            if np.linalg.norm(q_next - state[:self.num_positions]) < 0.2:
-                self.index += 1
-        else:
-            # End of path reached -> hold final configuration
-            q_next = self.path[-1]
+                    # Pick next waypoint
+                    q_next = path[self.index_q_next]
 
-        # Update the system’s discrete output (next target configuration)
+                    # If robot is close enough → go to next waypoint
+                    if np.linalg.norm(q_next - q_i) < 0.2:
+                        self.index_q_next += 1
+
+                else:
+                    # End of this sub-path → move to next path
+                    print(f"[SEQ] Reached waypoint {self.index_path}")
+                    self.index_path += 1
+                    self.index_q_next = 0
+
+            else:
+                # End of ALL paths → hold last waypoint
+                last_path = self.trajectorys[-1]
+                q_next = last_path[-1]
+
+        # Update the system output
         discrete_state.get_mutable_vector().SetFromVector(q_next)
+
 
         
     def check_configuration_validity(self, q):
@@ -414,6 +364,25 @@ class MotionProfile(LeafSystem):
 
         model_instance = body.model_instance()
         return self.plant.GetModelInstanceName(model_instance)
+
+    def get_trajectorys(self, way_pts, init_q, timeout):
+        self.traj = []
+
+        
+        self.traj.append(
+            self.plan_joint_space(init_q, way_pts[0], timeout=timeout)
+        )
+
+        for i in range(len(way_pts) - 1):
+            q_start = way_pts[i]
+            q_goal = way_pts[i+1]
+            path = self.plan_joint_space(q_start, q_goal, timeout=timeout)
+            # If planner fails, fall back to holding the current position
+            if path is None:
+                path = q_start
+            self.traj.append(path)
+        return self.traj
+
 ######################################################################################################
 
 def plot_joint_tracking(logger_state, logger_traj, simulator_context, num_joints=9):
@@ -533,82 +502,86 @@ def get_cube_poses(plant, context):
 
 
 class TAMPSequencer(LeafSystem):
-
-    def __init__(self, waypoints, planner_function, delay=2.0):
-        """
-        waypoints : [[q1], [q2], ..., [qn]]
-        planner_function : fonction interne (ex: motion_profile.plan_joint_space)
-        delay : temps d’attente entre deux trajectoires
-        """
+    def __init__(self, waypoints, tolerance=0.05):
         super().__init__()
+        self.waypoints = [np.asarray(w) for w in waypoints]
+        self.tolerance = tolerance
 
-        self.waypoints = waypoints
-        self.planner = planner_function   # <-- ta fonction interne existante
-        self.delay = delay
+        # Two discrete variables: [index, wait_timer]
+        self.DeclareDiscreteState(2)
 
-        # liste de sous-listes :
-        # [ traj(q1->q2), traj(q2->q3), ... ]
-        self.paths = []
-
-        # ---- Compute all trajectories BEFORE simulation ----
-        print("[Sequencer] Computing all trajectories...")
-        for i in range(len(waypoints)-1):
-            q_start = waypoints[i]
-            q_goal  = waypoints[i+1]
-
-            traj = self.planner(q_start, q_goal)   # <-- TA fonction
-            if traj is None:
-                raise RuntimeError("Planner failed between waypoint {} and {}".format(i,i+1))
-
-            self.paths.append(traj)   # <--- sous-liste
-            print(f"[Sequencer] traj {i}: {len(traj)} points")
-
-        # For streaming
-        self.current_path = 0      # index de la sous-liste
-        self.current_index = 0     # index du point dans la sous-liste
-        self.wait_timer = 0.0
-
-        nq = len(waypoints[0])
-        self.DeclareVectorOutputPort("q_d", nq, self.CalcOutput)
-
-        self.dt = 0.01
-        self.DeclarePeriodicDiscreteUpdateEvent(
-            period_sec=self.dt,
-            offset_sec=0.0,
-            update=self.Update
+        # Input: robot state (q,v)
+        self._state_port = self.DeclareVectorInputPort(
+            "state", len(waypoints[0]) * 2
         )
 
-    def Update(self, context, discrete_state):
-        # If all paths sent → stay at last point
-        if self.current_path >= len(self.paths):
+        # Output: q_d
+        self.DeclareVectorOutputPort(
+            "q_d", len(waypoints[0]), self.calc_output
+        )
+
+        
+        self.update_dt = 0.001
+        self.DeclarePeriodicDiscreteUpdateEvent(
+            period_sec=self.update_dt,
+            offset_sec=0.0,
+            update=self.update_index
+        )
+
+        self.wait_duration = 3.0
+
+    def update_index(self, context, discrete_state):
+        q = self._state_port.Eval(context)[:len(self.waypoints[0])]
+
+        # --- FIXED Drake API ---
+        vec = discrete_state.get_mutable_vector(0)
+        i = int(vec[0])
+        wait_timer = float(vec[1])
+
+        # clamp
+        if i < 0: i = 0
+        if i >= len(self.waypoints):
+            i = len(self.waypoints) - 1
+            vec[0] = i
+            vec[1] = 0
             return
 
-        path = self.paths[self.current_path]
+        dist = np.linalg.norm(q - self.waypoints[i])
 
-        # If reached end of sub-list → wait
-        if self.current_index >= len(path):
-            if self.wait_timer <= 0:
-                self.wait_timer = self.delay        # start delay
-            else:
-                self.wait_timer -= self.dt
-                if self.wait_timer <= 0:
-                    self.current_path += 1          # next trajectory
-                    self.current_index = 0
+        # Debug
+        #print(f"[SEQ] t={context.get_time():.3f} i={i} wait={wait_timer:.3f} dist={dist:.3f}")
+
+        # Case 1: Still waiting
+        if wait_timer > 0:
+            wait_timer = max(0.0, wait_timer - self.update_dt)
+            if wait_timer == 0.0 and i < len(self.waypoints) - 1:
+                i += 1
+                print(f"[SEQ] Finished waiting -> next waypoint {i}")
+            vec[0] = i
+            vec[1] = wait_timer
             return
 
-        # Else: send next point
-        self.current_index += 1
-
-    def CalcOutput(self, context, output):
-        # If all trajectories done: output last config
-        if self.current_path >= len(self.paths):
-            output.SetFromVector(self.paths[-1][-1])
+        # Case 2: Check if reached
+        if dist < self.tolerance:
+            wait_timer = self.wait_duration
+            print(f"[SEQ] Reached waypoint {i} -> start wait")
+            vec[0] = i
+            vec[1] = wait_timer
             return
 
-        path = self.paths[self.current_path]
-        idx = min(self.current_index, len(path)-1)
+        # Otherwise hold
+        vec[0] = i
+        vec[1] = wait_timer
 
-        output.SetFromVector(path[idx])
+    def calc_output(self, context, output):
+        i = int(context.get_discrete_state_vector()[0])
+        if i < 0: i = 0
+        if i >= len(self.waypoints):
+            i = len(self.waypoints) - 1
+        #print(self.waypoints[i])
+        output.SetFromVector(self.waypoints[i])
+
+
 
 
 # Function to Create Simulation Scene
@@ -658,44 +631,36 @@ def create_sim_scene(sim_time_step):
 
     X_WE_desired_1 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5,-0.25, 0.22])
     X_WE_desired_2 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
-    X_WE_desired_3 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, -0.25, 0.70])
+    X_WE_desired_3 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, -0.25, 0.22])
     X_WE_desired_4 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
     
     #X_WE_desired = RigidTransform(cube_poses["red_link"].rotation(),cube_poses["red_link"].translation())
     #print(X_WE_desired)
 
-    q_target_1 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_1) 
-    q_target_1[7] = 0.04
-    q_target_1[8] = 0.04
-    q_target_2 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_2)
-    q_target_2[7] = 0.04
-    q_target_2[8] = 0.04
-    q_target_3 = q_target_2.copy()
-    q_target_3[7] = 0.0000
-    q_target_3[8] = 0.0000
-    q_target_4 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_3)
-    q_target_4[7] = 0.0000
-    q_target_4[8] = 0.0000
-    q_target_5 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_4) 
-    q_target_5[7] = 0.0001
-    q_target_5[8] = 0.0001
-    sequencer = builder.AddSystem(TAMPSequencer(waypoints=[q_target_1, q_target_2,q_target_3,q_target_4],tolerance=0.08))
-    path_planner = builder.AddNamedSystem("Motion Profile",MotionProfile(trajInit_=q_start))
+    q_t1 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_1) 
+    q_t2 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_2) 
+  
+
+    way_pts = [q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,]
+    #sequencer = builder.AddSystem(TAMPSequencer(waypoints=[q_target_1, q_target_2,q_target_3,q_target_4],tolerance=0.08))
+    path_planner = builder.AddNamedSystem("Motion Profile",MotionProfile(waypoints=way_pts))
 
     
 
     #des_pos = builder.AddNamedSystem("Desired position", ConstantVectorSource(q_target))
     
     
-    builder.Connect(plant.GetOutputPort("panda_state"),sequencer.GetInputPort("state"))
-    builder.Connect(sequencer.get_output_port(0),path_planner.GetInputPort("q_desired"))
-    print(sequencer.get_output_port(0))
+    #builder.Connect(plant.GetOutputPort("panda_state"),sequencer.GetInputPort("state"))
+    #builder.Connect(sequencer.get_output_port(0),path_planner.GetInputPort("q_desired"))
     # Connect systems: plant outputs to controller inputs, and vice versa
+    
+    builder.Connect(plant.GetOutputPort("panda_state"), path_planner.GetInputPort("state"))
+    builder.Connect(path_planner.get_output_port(0), controller.GetInputPort("Desired_state"))
+
     builder.Connect(plant.GetOutputPort("panda_state"), controller.GetInputPort("Current_state")) 
-    builder.Connect(plant.GetOutputPort("panda_state"), path_planner.GetInputPort("state")) 
     builder.Connect(controller.GetOutputPort("tau_u"), plant.GetInputPort("panda_actuation"))
     #builder.Connect(des_pos.get_output_port(), path_planner.GetInputPort("q_desired"))
-    builder.Connect(path_planner.get_output_port(0), controller.GetInputPort("Desired_state"))
+
 
     logger_state = LogVectorOutput(plant.GetOutputPort("panda_state"), builder)
     logger_state.set_name("State logger")
@@ -724,7 +689,7 @@ def run_simulation(sim_time_step):
     
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(30.0)  # Adjust this time as needed
+    simulator.AdvanceTo(60.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
