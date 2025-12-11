@@ -489,101 +489,6 @@ def solve_ik(plant, context, frame_E, X_WE_desired):
         print("IK did not converge!")
         return None
 
-def get_cube_poses(plant, context):
-    cubes = ["red_link", "green_link", "blue_link"]
-    poses = {}
-
-    for link_name in cubes:
-        body = plant.GetBodyByName(link_name)
-        X_WB = plant.EvalBodyPoseInWorld(context, body)
-        poses[link_name] = X_WB
-
-    return poses
-
-
-class TAMPSequencer(LeafSystem):
-    def __init__(self, waypoints, tolerance=0.05):
-        super().__init__()
-        self.waypoints = [np.asarray(w) for w in waypoints]
-        self.tolerance = tolerance
-
-        # Two discrete variables: [index, wait_timer]
-        self.DeclareDiscreteState(2)
-
-        # Input: robot state (q,v)
-        self._state_port = self.DeclareVectorInputPort(
-            "state", len(waypoints[0]) * 2
-        )
-
-        # Output: q_d
-        self.DeclareVectorOutputPort(
-            "q_d", len(waypoints[0]), self.calc_output
-        )
-
-        
-        self.update_dt = 0.001
-        self.DeclarePeriodicDiscreteUpdateEvent(
-            period_sec=self.update_dt,
-            offset_sec=0.0,
-            update=self.update_index
-        )
-
-        self.wait_duration = 3.0
-
-    def update_index(self, context, discrete_state):
-        q = self._state_port.Eval(context)[:len(self.waypoints[0])]
-
-        # --- FIXED Drake API ---
-        vec = discrete_state.get_mutable_vector(0)
-        i = int(vec[0])
-        wait_timer = float(vec[1])
-
-        # clamp
-        if i < 0: i = 0
-        if i >= len(self.waypoints):
-            i = len(self.waypoints) - 1
-            vec[0] = i
-            vec[1] = 0
-            return
-
-        dist = np.linalg.norm(q - self.waypoints[i])
-
-        # Debug
-        #print(f"[SEQ] t={context.get_time():.3f} i={i} wait={wait_timer:.3f} dist={dist:.3f}")
-
-        # Case 1: Still waiting
-        if wait_timer > 0:
-            wait_timer = max(0.0, wait_timer - self.update_dt)
-            if wait_timer == 0.0 and i < len(self.waypoints) - 1:
-                i += 1
-                print(f"[SEQ] Finished waiting -> next waypoint {i}")
-            vec[0] = i
-            vec[1] = wait_timer
-            return
-
-        # Case 2: Check if reached
-        if dist < self.tolerance:
-            wait_timer = self.wait_duration
-            print(f"[SEQ] Reached waypoint {i} -> start wait")
-            vec[0] = i
-            vec[1] = wait_timer
-            return
-
-        # Otherwise hold
-        vec[0] = i
-        vec[1] = wait_timer
-
-    def calc_output(self, context, output):
-        i = int(context.get_discrete_state_vector()[0])
-        if i < 0: i = 0
-        if i >= len(self.waypoints):
-            i = len(self.waypoints) - 1
-        #print(self.waypoints[i])
-        output.SetFromVector(self.waypoints[i])
-
-
-
-
 # Function to Create Simulation Scene
 def create_sim_scene(sim_time_step):   
     builder = DiagramBuilder()
@@ -608,13 +513,6 @@ def create_sim_scene(sim_time_step):
     plant.SetDefaultPositions(robot, q_start)
     #print(plant.GetDefaultPositions())
 
-    
-    cube_poses = get_cube_poses(plant,plant.CreateDefaultContext())
-
-    #print("Red cube:", cube_poses["red_link"].rotation())
-    #print("Green cube:", cube_poses["green_link"].rotation())
-    #print("Blue cube:", cube_poses["blue_link"].rotation())
-
 
     # Add visualization to see the geometries in MeshCat
     AddDefaultVisualization(builder=builder, meshcat=meshcat)
@@ -631,35 +529,22 @@ def create_sim_scene(sim_time_step):
 
     X_WE_desired_1 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5,-0.25, 0.22])
     X_WE_desired_2 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
-    X_WE_desired_3 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, -0.25, 0.22])
-    X_WE_desired_4 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
-    
-    #X_WE_desired = RigidTransform(cube_poses["red_link"].rotation(),cube_poses["red_link"].translation())
-    #print(X_WE_desired)
+   
 
     q_t1 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_1) 
     q_t2 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_2) 
   
 
     way_pts = [q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,]
-    #sequencer = builder.AddSystem(TAMPSequencer(waypoints=[q_target_1, q_target_2,q_target_3,q_target_4],tolerance=0.08))
     path_planner = builder.AddNamedSystem("Motion Profile",MotionProfile(waypoints=way_pts))
 
-    
-
-    #des_pos = builder.AddNamedSystem("Desired position", ConstantVectorSource(q_target))
-    
-    
-    #builder.Connect(plant.GetOutputPort("panda_state"),sequencer.GetInputPort("state"))
-    #builder.Connect(sequencer.get_output_port(0),path_planner.GetInputPort("q_desired"))
     # Connect systems: plant outputs to controller inputs, and vice versa
     
     builder.Connect(plant.GetOutputPort("panda_state"), path_planner.GetInputPort("state"))
     builder.Connect(path_planner.get_output_port(0), controller.GetInputPort("Desired_state"))
-
     builder.Connect(plant.GetOutputPort("panda_state"), controller.GetInputPort("Current_state")) 
     builder.Connect(controller.GetOutputPort("tau_u"), plant.GetInputPort("panda_actuation"))
-    #builder.Connect(des_pos.get_output_port(), path_planner.GetInputPort("q_desired"))
+    
 
 
     logger_state = LogVectorOutput(plant.GetOutputPort("panda_state"), builder)
