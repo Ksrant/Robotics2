@@ -110,7 +110,7 @@ class MotionProfile(LeafSystem):
         self.index_path = 0
         self.index_q_next = 0
         self.flag = True
-        self.min_distance = 0.05
+        self.min_distance = 0.001
         update_period = time_period / self.num_points
         builder = DiagramBuilder()
         plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.01)
@@ -130,7 +130,7 @@ class MotionProfile(LeafSystem):
         plant.RegisterCollisionGeometry(table_body,RigidTransform(),  table_shape,"table_collision",CoulombFriction(0.3, 0.3))
         plant.RegisterVisualGeometry(table_body,RigidTransform(),table_shape,"table_visual",[0.82, 0.71, 0.55, 1.0]  )
 
-        table_pose = RigidTransform([0.55, 0.0, 0.025])
+        table_pose = RigidTransform(RollPitchYaw(0, 0,0),[0.55, 0.0, 0.025])
         plant.WeldFrames(plant.world_frame(), table_body.body_frame(), table_pose)
 
         # --- Wall ---
@@ -143,7 +143,7 @@ class MotionProfile(LeafSystem):
         plant.RegisterCollisionGeometry(wall_body,RigidTransform(),wall_shape,"wall_collision",CoulombFriction(0.3, 0.3))
         plant.RegisterVisualGeometry(wall_body,RigidTransform(),wall_shape,"wall_visual",[0.92, 0.51, 0.55, 1.0]  )
 
-        wall_pose = RigidTransform([0.55, 0.0, 0.2])
+        wall_pose = RigidTransform(RollPitchYaw(0, 0,0),[0.55, 0.0, 0.2])
         plant.WeldFrames(plant.world_frame(), wall_body.body_frame(), wall_pose)
 
 
@@ -206,8 +206,9 @@ class MotionProfile(LeafSystem):
                     # Pick next waypoint
                     q_next = path[self.index_q_next]
 
+                    
                     # If robot is close enough → go to next waypoint
-                    if np.linalg.norm(q_next - q_i) < 0.2:
+                    if np.linalg.norm(q_next - q_i) < 0.2 :
                         self.index_q_next += 1
 
                 else:
@@ -489,6 +490,111 @@ def solve_ik(plant, context, frame_E, X_WE_desired):
         print("IK did not converge!")
         return None
 
+def get_cube_poses(plant, context):
+    cubes = ["red_link", "green_link", "blue_link"]
+    poses = {}
+
+    for link_name in cubes:
+        body = plant.GetBodyByName(link_name)
+        X_WB = plant.EvalBodyPoseInWorld(context, body)
+        poses[link_name] = X_WB
+
+    return poses
+
+def pick_and_place(final_configuration, plant, context):
+    #final_configuration : dico {cube_name : pose} qui donne la configuration finale du cube de la tour le plus bas au plus haut
+
+    current_poses = get_cube_poses(plant, context)
+    #print(current_poses)
+    operations = []  # List of (cube, action, pose) in execution order  
+
+    intermediate_x_pattern = [1, -1, 0, 0, -1, 1, 1, 0]
+    intermediate_y_pattern = [0, 0, 1, -1, 1, 1, -1, -1]
+    intermediate_amount = 0
+    m = 0.025*3 # assuming block size of 0.025m
+    n = m # assuming block size of 0.025m
+
+    at_final = []
+    #print(len(final_configuration))
+    
+    break_flag = False
+    for cube in current_poses: # loop to move all cubes to their intermediate positions first
+        
+        current_pose = current_poses[cube]
+        target_pose = final_configuration[cube]
+        
+        if np.linalg.norm(current_pose.translation()- target_pose.translation()) < 1e-3 :
+            # print(f"{cube} already at target position.")
+            at_final.append(cube)
+            continue  # on ne fait rien si le cube est déjà placé à sa target position
+
+        print(f"{cube} not at target position. Planning pick and place.")
+        pos = current_pose.translation()
+
+        for other, other_pose in reversed(current_poses.items()):
+            same_xy = (abs(pos[0] - other_pose.translation()[0]) < 0.05 and abs(pos[1] - other_pose.translation()[1]) < 0.05 )
+            above = other_pose.translation()[2] > pos[2]
+            # print(f"Checking if {other} is blocking {cube}: same_xy={same_xy}, above={above}")
+            i = 0
+            if (same_xy and above) or (other == cube):
+                b = other
+                ps = current_poses[b].translation().copy()
+                ps[2]+=0.06
+                if ps[2] <0.1675:
+                    ps[2]= 0.168
+                ps_ = RigidTransform(RollPitchYaw(0, 0, 0), ps)
+                
+                operations.append((b, "pick", ps_))
+                
+                # Determine which cycle we're in (0-based)
+                cycle = intermediate_amount // 8
+                
+                # Determine position within cycle
+                pos_in_cycle = intermediate_amount % 8
+                
+                # Scale increases with cycle number
+                scale = cycle + 1
+                
+                intermediate_trans = other_pose.translation().copy()
+                # Calculate the movement
+                intermediate_trans[0] += intermediate_x_pattern[pos_in_cycle] * scale * n
+                intermediate_trans[1] += intermediate_y_pattern[pos_in_cycle] * scale * m
+                intermediate_trans[2] = 0.1675#0.05+0.025/2 # height of cube on table
+                print(intermediate_trans,intermediate_amount)
+                intermediate_pos = RigidTransform(RotationMatrix.Identity(), intermediate_trans)
+                intermediate_amount += 1
+                
+                operations.append((b,"place", intermediate_pos))
+                current_poses[b] = intermediate_pos #je pense on peut supp cette ligne
+                if other == cube:
+                    break_flag = True
+                    break  # no need to pick and place itself again
+            
+        if break_flag:
+            # print(f"Breaking out of cube loop after handling {cube}.")
+            break
+        
+    for cube in final_configuration: # loop to move all cubes to their final positions
+        if cube in at_final:
+            continue  # skip cubes already at final position
+
+        current_pose = current_poses[cube]
+        target_pose = final_configuration[cube]
+
+        # print(f"Picking and placing {cube} to target position.")
+
+        operations.append((cube,"pick", current_pose))
+        operations.append((cube,"place", target_pose))
+        current_poses[cube] = target_pose
+
+    return operations
+def gripper_action(pt, offset):
+    p = pt.copy()
+    p[7] = offset
+    p[8] = offset
+    return p
+
+
 # Function to Create Simulation Scene
 def create_sim_scene(sim_time_step):   
     builder = DiagramBuilder()
@@ -504,8 +610,6 @@ def create_sim_scene(sim_time_step):
 
     
     plant.Finalize()
-
-
     
     robot = plant.GetModelInstanceByName("panda")
     # Set the initial joint position of the robot otherwise it will correspond to zero positions
@@ -526,17 +630,69 @@ def create_sim_scene(sim_time_step):
     context_panda_ik = panda_ik.CreateDefaultContext()
     frame_E = panda_ik.GetFrameByName("panda_hand")
 
-
-    X_WE_desired_1 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5,-0.25, 0.22])
-    X_WE_desired_2 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.22])
    
+    context = plant.CreateDefaultContext()
 
+
+    # final configuration of the cubes (from bottom to top)    
+    # desired_order = ["red_link", "blue_link", "green_link"]
+    desired_order = ["blue_link", "green_link","red_link"]
+
+    #desired_circle = "link_initial"  # "link_initial" or "link_target"
+    #X_WB_circle = plant.EvalBodyPoseInWorld(context, plant.GetBodyByName(desired_circle))
+    cylinder_target_instance = plant.GetModelInstanceByName("cylinder_target")
+
+    cylinder_target_body = plant.GetBodyByName("link",cylinder_target_instance)
+    X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
+
+    final_configuration = {}
+    for i, cube_name in enumerate(desired_order):
+        height = 0.05 + 0.025/2 + (i)*0.025   # wall height + cube height/2 + stack height
+        final_configuration[cube_name] = RigidTransform(RotationMatrix.Identity(), [X_WB_circle.translation()[0], X_WB_circle.translation()[1], height]) 
+
+    pick_place_sequence = pick_and_place(final_configuration, plant, context)
+    #print("Pick and Place Sequence:", pick_place_sequence)
+
+    X_WE_desired_1 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, -0.25, 0.167])
     q_t1 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_1) 
-    q_t2 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_2) 
-  
+    q_t1[7]= 0.001
+    q_t1[8]= 0.001
 
-    way_pts = [q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,q_t1,q_t2,]
-    path_planner = builder.AddNamedSystem("Motion Profile",MotionProfile(waypoints=way_pts))
+
+    way_pts = []
+    offset = 0.1
+
+    #apply an offset in z  + ik
+    for i in range(6):
+        
+        X = pick_place_sequence[i][2]
+        p = X.translation().copy()   # np.array (3,)
+        p[2]+= offset
+        if p[2] < 0.1675:
+            p[2] = 0.1675
+        way_pts.append(('----',solve_ik(panda_ik, context_panda_ik, frame_E,RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
+        way_pts.append((pick_place_sequence[i][1],solve_ik(panda_ik, context_panda_ik, frame_E,RigidTransform(RollPitchYaw(np.pi, 0, 0), X.translation()))))
+        way_pts.append(('----',solve_ik(panda_ik, context_panda_ik, frame_E,RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
+    print(pick_place_sequence[5])
+    print(pick_place_sequence[6])
+    
+    way_pts_bis = []
+    for i in (way_pts):
+        prev = ''
+        if i[0]=='place':
+            way_pts_bis.append(gripper_action(i[1],0.00))
+            way_pts_bis.append(gripper_action(i[1],0.04))
+        elif i[0]=='pick':
+            way_pts_bis.append(gripper_action(i[1],0.04))
+            way_pts_bis.append(gripper_action(i[1],0.00))
+        else:
+            way_pts_bis.append(i[1])
+
+    #print(len(way_pts_bis))
+
+
+
+    path_planner = builder.AddNamedSystem("Motion Profile",MotionProfile(waypoints=way_pts_bis))
 
     # Connect systems: plant outputs to controller inputs, and vice versa
     
@@ -574,7 +730,7 @@ def run_simulation(sim_time_step):
     
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(60.0)  # Adjust this time as needed
+    simulator.AdvanceTo(100.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
