@@ -106,12 +106,13 @@ class MotionProfile(LeafSystem):
 
         self.waypoints = [np.asarray(w) for w in waypoints]
         self.num_points = 40
-        time_period = 3.0
+        
         self.index_path = 0
         self.index_q_next = 0
         self.flag = True
         self.min_distance = 0.001
-        update_period = time_period / self.num_points
+        #update_period = time_period / self.num_points
+        update_period = 1/50
         builder = DiagramBuilder()
         plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.01)
         parser = Parser(plant)
@@ -184,7 +185,7 @@ class MotionProfile(LeafSystem):
 
         # Compute trajectory only once
         if self.flag:
-            self.trajectorys = self.get_trajectorys(self.waypoints, q_i, 4)
+            self.trajectorys = self.get_trajectorys(self.waypoints, q_i, 10)
             self.index_path = 0
             self.index_q_next = 0
             self.flag = False
@@ -268,7 +269,7 @@ class MotionProfile(LeafSystem):
         # Check against threshold
         return min_dist >= self.min_distance
         
-    def plan_joint_space(self, q_start, q_goal, timeout=3):
+    def plan_joint_space(self, q_start, q_goal, timeout=10):
         """
         Plans a collision-free path in the robot's joint space using OMPL's RRT-Connect algorithm.
 
@@ -642,28 +643,27 @@ def create_sim_scene(sim_time_step):
     #X_WB_circle = plant.EvalBodyPoseInWorld(context, plant.GetBodyByName(desired_circle))
     cylinder_target_instance = plant.GetModelInstanceByName("cylinder_target")
 
-    cylinder_target_body = plant.GetBodyByName("link",cylinder_target_instance)
+    cylinder_target_body = plant.GetBodyByName("link_target",cylinder_target_instance)
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
 
     final_configuration = {}
     for i, cube_name in enumerate(desired_order):
-        height = 0.05 + 0.025/2 + (i)*0.025   # wall height + cube height/2 + stack height
+        height = 0.1675  + (i)*0.025   # wall height + cube height/2 + stack height
         final_configuration[cube_name] = RigidTransform(RotationMatrix.Identity(), [X_WB_circle.translation()[0], X_WB_circle.translation()[1], height]) 
 
     pick_place_sequence = pick_and_place(final_configuration, plant, context)
-    #print("Pick and Place Sequence:", pick_place_sequence)
-
-    X_WE_desired_1 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, -0.25, 0.167])
+    print("Pick and Place Sequence:", pick_place_sequence)
+    X_WE_desired_1 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, 0.25, 0.1675])
+    X_WE_desired_2 = RigidTransform(  RollPitchYaw(np.pi, 0, 0),[0.5, -0.25, 0.1675])
     q_t1 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_1) 
-    q_t1[7]= 0.001
-    q_t1[8]= 0.001
+    q_t2 = solve_ik(panda_ik, context_panda_ik, frame_E, X_WE_desired_2) 
 
 
     way_pts = []
     offset = 0.1
 
     #apply an offset in z  + ik
-    for i in range(6):
+    for i in range(len(pick_place_sequence)):
         
         X = pick_place_sequence[i][2]
         p = X.translation().copy()   # np.array (3,)
@@ -673,8 +673,6 @@ def create_sim_scene(sim_time_step):
         way_pts.append(('----',solve_ik(panda_ik, context_panda_ik, frame_E,RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
         way_pts.append((pick_place_sequence[i][1],solve_ik(panda_ik, context_panda_ik, frame_E,RigidTransform(RollPitchYaw(np.pi, 0, 0), X.translation()))))
         way_pts.append(('----',solve_ik(panda_ik, context_panda_ik, frame_E,RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
-    print(pick_place_sequence[5])
-    print(pick_place_sequence[6])
     
     way_pts_bis = []
     for i in (way_pts):
@@ -730,11 +728,11 @@ def run_simulation(sim_time_step):
     
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(100.0)  # Adjust this time as needed
+    simulator.AdvanceTo(60.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
     plot_joint_tracking(logger_state, logger_traj, simulator.get_context())
 
 # Run the simulation with a specific time step. Try gradually increasing it!
-run_simulation(sim_time_step=0.001)
+run_simulation(sim_time_step=0.0005)
