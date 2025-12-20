@@ -638,7 +638,7 @@ def create_sim_scene(sim_time_step):
 
     # final configuration of the cubes (from bottom to top)
     # desired_order = ["red_link", "blue_link", "green_link"]
-    desired_order = ["blue_link", "green_link", "red_link"]
+    desired_order = ["red_link", "green_link", "blue_link"]
 
     # desired_circle = "link_initial"  # "link_initial" or "link_target"
     # X_WB_circle = plant.EvalBodyPoseInWorld(context, plant.GetBodyByName(desired_circle))
@@ -738,3 +738,5 @@ def run_simulation(sim_time_step):
 
 # Run the simulation with a specific time step. Try gradually increasing it!
 run_simulation(sim_time_step=0.0005)
+
+# rouge - vert - bleu (du plus bas au plus haut)
