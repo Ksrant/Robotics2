@@ -1,0 +1,443 @@
+
+import os
+import sys 
+import numpy as np
+import pydot
+from IPython.display import SVG, display
+import matplotlib.pyplot as plt
+
+# Import necessary parts of Drake
+from pydrake.geometry import StartMeshcat, SceneGraph, Box as DrakeBox, HalfSpace
+from pydrake.math import RotationMatrix, RigidTransform, RollPitchYaw
+from pydrake.math import RigidTransform
+from pydrake.multibody.parsing import Parser
+from pydrake.multibody.plant import AddMultibodyPlantSceneGraph, MultibodyPlant, CoulombFriction
+from pydrake.multibody.tree import SpatialInertia, UnitInertia
+from pydrake.systems.analysis import Simulator
+from pydrake.systems.framework import DiagramBuilder
+from pydrake.visualization import AddDefaultVisualization, ModelVisualizer
+from pydrake.systems.framework import LeafSystem
+from pydrake.systems.primitives import ConstantVectorSource, LogVectorOutput
+from pydrake.all import Variable, MakeVectorVariable
+
+from helper.dynamics import CalcRobotDynamics
+from pydrake.all import (InverseKinematics,Solve,)
+# --------------------------------------------------------------------
+# Global settings
+# --------------------------------------------------------------------
+# Start Meshcat visualizer: this will give you a link in the notebook/terminal
+meshcat = StartMeshcat()
+## clean up previous instances
+meshcat.Delete()
+meshcat.DeleteAddedControls()
+
+# Path to Panda robot URDF and the world SDF
+world_path = os.path.join("..", "models", "descriptions", "project_06_TAMP.sdf")
+panda_path = os.path.join("..", "models", "descriptions", "robots", "arms",
+                          "franka_description", "urdf", "panda_arm_hand.urdf")
+
+
+def make_entier_world():
+    return
+
+
+def make_panda():
+    plant = MultibodyPlant(time_step=0.0)
+    parser = Parser(plant)
+    parser.AddModelsFromUrl("file://" + os.path.abspath(panda_path))
+  
+    base = plant.GetBodyByName("panda_link0")
+    plant.WeldFrames(plant.world_frame(), base.body_frame())
+    
+    plant.Finalize()
+    return plant
+
+class PandaStateExtractor(LeafSystem):
+    def __init__(self, plant, panda_model):
+        super().__init__()
+        self.plant = plant
+        self.panda_model = panda_model
+        
+        n_full = plant.num_multibody_states()
+        self.DeclareVectorInputPort("full_state", n_full)
+        self.DeclareVectorOutputPort("panda_state", 18, self.calc_panda)
+
+    def calc_panda(self, context, output):
+        x = self.get_input_port(0).Eval(context)
+
+        # Indices des positions et vitesses du Panda
+        pos_start = self.plant.GetPositionsFromArray(self.panda_model, x[:self.plant.num_positions()])
+        vel_start = self.plant.GetVelocitiesFromArray(self.panda_model, x[self.plant.num_positions():])
+
+        # Si besoin, juste prendre les 9 positions + 9 vitesses
+        output.SetFromVector(np.hstack([pos_start, vel_start]))
+
+
+
+def create_sim_scene(sim_time_step):   
+    """
+    Create a simulation scene with our robot and optional extra bodies.
+
+    Args:
+        sim_time_step (float): The discrete time step for the plant.
+
+    Returns:
+        diagram (Diagram): A system diagram with the robot, optional objects, and visualization.
+    """
+
+    # A DiagramBuilder is where we construct our system
+    builder = DiagramBuilder()
+
+    # Add a MultibodyPlant (for physics) and a SceneGraph (for geometry/visualization)
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=sim_time_step)
+    
+    # Load the model from URDF
+    
+    Parser(plant).AddModelsFromUrl("file://" + os.path.abspath(world_path))[0]           # loads tables, cubes, etc.
+    panda_model = Parser(plant).AddModelsFromUrl("file://" + os.path.abspath(panda_path))[0]   # loads the Panda robot
+
+   
+    # Fix the Panda base to the world so it doesn’t fall
+    base_link = plant.GetBodyByName("panda_link0")
+    plant.WeldFrames(plant.world_frame(), base_link.body_frame())
+    
+    
+    # ----------------------------------------------------------------
+    # Finalize plant: no more bodies or joints can be added after this
+    # ----------------------------------------------------------------
+    plant.Finalize()
+
+    print("NUM POS = ", plant.num_positions())
+    print("NUM VEL = ", plant.num_velocities())
+    print("NUM STATES = ", plant.num_multibody_states())
+
+
+    # ----------------------------------------------------------------
+    # Inspect contents: print bodies and joints of the Panda
+    # ----------------------------------------------------------------
+    print("\nBodies in the Panda model:")
+    for body_index in plant.GetBodyIndices(panda_model):
+        print("  -", plant.get_body(body_index).name())
+
+    print("\nJoints in the Panda model:")
+    for joint_index in plant.GetJointIndices(panda_model):
+        print("  -", plant.get_joint(joint_index).name())
+
+   
+    # ----------------------------------------------------------------
+    # Set initial/default states
+    # ----------------------------------------------------------------
+    
+    # Panda arm default joint configuration
+    plant.SetDefaultPositions(panda_model, [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.774, 0, 0])
+    
+    # ----------------------------------------------------------------
+    # Inspect initial state
+    # ----------------------------------------------------------------
+    plant_context = plant.CreateDefaultContext()
+    panda_instance = plant.GetModelInstanceByName("panda")
+
+    print("\nInitial Panda joint state (positions + velocities):")
+    print(plant.GetPositionsAndVelocities(plant_context, panda_model))
+
+
+    # The panda_hand is the end-effector frame
+    
+
+    # Solve inverse kinematics to find target joint positions for the desired end-effector pose
+    #q_target = solve_ik(plant, plant_context, frame_E, X_WE_desired)
+    # Solve inverse kinematics
+    # Suppose the first 9 joints of panda_instance are the arm + fingers we care about
+    panda = make_panda()
+    context_panda = panda.CreateDefaultContext()
+    frame_E = panda.GetFrameByName("panda_hand")
+    X_WE_desired = RigidTransform(
+        RollPitchYaw(np.pi, 0, 0),
+        [0.6, 0.0, 0.7]
+    )
+    
+    q_target = solve_ik(panda, context_panda, frame_E, X_WE_desired)
+    print(q_target)
+
+    # ----------------------------------------------------------------
+    # Add visualization
+    # ----------------------------------------------------------------
+    AddDefaultVisualization(builder=builder, meshcat=meshcat)
+
+    # Add a PD+G controller to regulate the robot
+    
+    controller = builder.AddNamedSystem("PD+G controller",Controller(panda))
+    
+    # Create a constant source for desired positions
+    des_pos = builder.AddNamedSystem("Desired position", ConstantVectorSource(q_target))
+    
+    
+    # Connect systems: plant outputs to controller inputs, and vice versa 
+    extractor = builder.AddSystem(PandaStateExtractor(plant, panda_model))
+    builder.Connect(plant.get_state_output_port(), extractor.get_input_port())
+    builder.Connect(extractor.get_output_port(), controller.GetInputPort("Current_state"))
+    builder.Connect(controller.GetOutputPort("tau_u"),  plant.get_actuation_input_port(panda_model))
+    builder.Connect(des_pos.get_output_port(), controller.GetInputPort("Desired_state"))
+
+    logger_state = LogVectorOutput(plant.get_state_output_port(), builder)
+    logger_state.set_name("State logger")
+
+    # Build and return the diagram
+    diagram = builder.Build()
+    return diagram, logger_state, q_target
+
+
+def plot_transient_response(logger_state, simulator_context, desired_positions, num_joints=9):
+    """
+    Plot joint positions (first 7 joints) and velocities from a LogVectorOutput logger.
+    Shows desired positions (q_r) vs actual positions (q_n).
+
+    Parameters
+    ----------
+    logger_state : LogVectorOutput
+        The logger that recorded the system state.
+    simulator_context : Context
+        The simulator context to extract logged data.
+    desired_positions : list or np.array
+        Desired joint positions (q_r) for plotting.
+    num_joints : int
+        Number of joints in the robot (default=9).
+    """
+    log = logger_state.FindLog(simulator_context)
+    time = log.sample_times()        # shape: (num_samples,)
+    data = log.data()                # shape: (num_joints*2, num_samples)
+
+    # Separate joint positions and velocities
+    q = data[:num_joints, :]        # actual positions
+    qdot = data[num_joints:, :]     # velocities
+
+    # Convert desired_positions to array if needed
+    q_r = np.array(desired_positions)
+
+    # ---------------- Joint Positions (first 7) ----------------
+    fig, axes = plt.subplots(7, 1, figsize=(8, 10), sharex=True)
+    for i in range(7):
+        axes[i].plot(time, q[i, :], label='q_n')           # actual
+        axes[i].plot(time, q_r[i]*np.ones_like(time), '--', label='q_r')  # desired
+        axes[i].set_ylabel(f'Joint {i+1} [rad]')
+        axes[i].legend()
+        axes[i].grid(True)
+    axes[-1].set_xlabel('Time [s]')
+    fig.suptitle('Joint Positions vs Desired Positions (q_r vs q_n)')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.show()
+
+    # ---------------- Joint Velocities (first 7) ----------------
+    fig, axes = plt.subplots(7, 1, figsize=(12, 14), sharex=True)
+    for i in range(7):
+        axes[i].plot(time, qdot[i, :], label=f'Joint {i+1} velocity')
+        axes[i].set_ylabel(f'Joint {i+1} [rad/s]')
+        axes[i].legend()
+        axes[i].grid(True)
+    axes[-1].set_xlabel('Time [s]')
+    fig.suptitle('Joint Velocities')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.show()
+
+
+class Controller(LeafSystem):
+    def __init__(self, plant):
+        super().__init__()
+
+        # Declare input ports for desired and current states
+        self._current_state_port = self.DeclareVectorInputPort(name="Current_state", size=18)
+        self._desired_state_port = self.DeclareVectorInputPort(name="Desired_state", size=9)
+
+        # PD+G gains (Kp and Kd)
+        self.Kp_ = [120.0, 120.0, 120.0, 100.0, 50.0, 45.0, 15.0, 120, 120]
+        self.Kd_ = [8.0, 8.0, 8.0, 5.0, 2.0, 2.0, 2.0, 5, 5]
+
+        # Store plant and context for dynamics calculations
+        self.plant, self.plant_context_ad = plant, plant.CreateDefaultContext()
+
+        # Declare discrete state and output port for control input (tau_u)
+        state_index = self.DeclareDiscreteState(9)  # 9 state variables.
+        self.DeclareStateOutputPort("tau_u", state_index)  # output: y=x.
+        self.DeclarePeriodicDiscreteUpdateEvent(
+            period_sec=1/1000,  # One millisecond time step.
+            offset_sec=0.0,  # The first event is at time zero.
+            update=self.compute_tau_u) # Call the Update method defined below.
+    
+    def compute_tau_u(self, context, discrete_state):
+        num_positions = self.plant.num_positions()
+        num_velocities = self.plant.num_velocities()
+
+        # Evaluate the input ports
+        self.q_d = self._desired_state_port.Eval(context)
+        self.q = self._current_state_port.Eval(context)
+
+        # Compute gravity forces for the current state
+        self.plant.SetPositionsAndVelocities(self.plant_context_ad, self.q)
+        #self.plant_context_ad.SetDiscreteState(self.q)
+        
+        gravity = -self.plant.CalcGravityGeneralizedForces(self.plant_context_ad)      
+        
+        tau = self.Kp_ * (self.q_d - self.q[:num_positions]) - self.Kd_ * self.q[num_positions:] + gravity
+
+        # Update the output port = state
+        discrete_state.get_mutable_vector().SetFromVector(tau)
+
+"""
+class Controller(LeafSystem):
+    def __init__(self, plant, panda_instance):
+        super().__init__()
+
+
+        # Save plant + instance of Panda
+        self.plant = plant
+        self.panda_instance = panda_instance
+        self.plant_context_ad = plant.CreateDefaultContext()
+
+        # Number of robot joints (7 joints + 2 fingers)
+        self.n = 9
+       
+        # Input ports
+        self._current_state_port = self.DeclareVectorInputPort(name="Current_state",size=self.plant.num_multibody_states())
+        self._desired_state_port = self.DeclareVectorInputPort(name="Desired_state", size=self.n)
+
+        # PD+G gains
+        self.Kp_ = np.array([100, 80, 100, 50, 50, 50, 100, 10, 10])
+        self.Kd_ = np.array([15, 15, 15, 15, 15, 15, 15, 5, 5])
+
+        # Declare discrete state and output (tau_u)
+        idx = self.DeclareDiscreteState(self.n)
+        self.DeclareStateOutputPort("tau_u", idx)
+        self.DeclarePeriodicDiscreteUpdateEvent(
+            period_sec=1/1000,
+            offset_sec=0.0,
+            update=self.compute_tau_u
+        )
+
+    def compute_tau_u(self, context, discrete_state):
+
+        # Read full state (size --)
+        x_full = self._current_state_port.Eval(context)
+
+        # Split into q and v
+        q_full = x_full[:self.plant.num_positions()]         # 30
+        v_full = x_full[self.plant.num_positions():]         # 27
+
+        # Update the plant context
+        self.plant.SetPositions(self.plant_context_ad, q_full)
+        self.plant.SetVelocities(self.plant_context_ad, v_full)
+
+        # Extract Panda joint states (size 9)
+        q = self.plant.GetPositions(self.plant_context_ad, self.panda_instance)
+        v = self.plant.GetVelocities(self.plant_context_ad, self.panda_instance)
+
+        # Desired positions
+        q_d = self._desired_state_port.Eval(context)         # size 9
+
+        # Compute gravity torques
+        g_full = -self.plant.CalcGravityGeneralizedForces(self.plant_context_ad)
+        g = g_full[:9]     # first 9 DOFs are Panda joints !!!! 
+
+        # PD+Gravity torque
+        tau = self.Kp_ * (q_d - q) - self.Kd_ * v + g
+
+        # Output
+        discrete_state.get_mutable_vector().SetFromVector(tau)
+"""
+
+def solve_ik(plant, context, frame_E, X_WE_desired):
+    """
+    Solves inverse kinematics for a given end-effector pose.
+
+    Args:
+        plant: MultibodyPlant
+        context: plant.CreateDefaultContext() or similar
+        frame_E: End-effector Frame (e.g. plant.GetFrameByName("ee"))
+        X_WE_desired: RigidTransform of desired world pose of end-effector
+
+    Returns:
+        q_solution: numpy array of joint positions if successful, else None
+    """
+    ik = InverseKinematics(plant, context)
+
+    # Set nominal joint positions to current positions
+    q_nominal = plant.GetPositions(context).reshape((-1, 1))
+
+    
+    # Constrain position and orientation
+    # Position constraint
+    p_AQ = X_WE_desired.translation().reshape((3, 1))
+    ik.AddPositionConstraint(
+        frameB=frame_E,
+        p_BQ=np.zeros((3, 1)),  # Here, p_BQ = [0, 0, 0] means we’re constraining the origin of the E frame.
+        frameA=plant.world_frame(),
+        p_AQ_lower=p_AQ,
+        p_AQ_upper=p_AQ
+    )
+
+    # Orientation constraint
+    theta_bound = 1e-2  # radians
+    ik.AddOrientationConstraint(
+        frameAbar=plant.world_frame(),      # world frame
+        R_AbarA=X_WE_desired.rotation(),    # desired orientation
+        frameBbar=frame_E,                  # end-effector frame
+        R_BbarB=RotationMatrix(),           # current orientation
+        theta_bound=theta_bound             # allowable deviation
+    )
+
+    # Access the underlying MathematicalProgram to add costs and constraints manually.
+    prog = ik.prog()
+    q_var = ik.q()  # decision variables (joint angles)
+    # Add a quadratic cost to stay close to the nominal configuration:
+    #   cost = (q - q_nominal)^T * W * (q - q_nominal)
+    W = np.identity(q_nominal.shape[0])
+    prog.AddQuadraticErrorCost(W, q_nominal, q_var)
+
+    # Enforce joint position limits from the robot model.
+    lower = plant.GetPositionLowerLimits()
+    upper = plant.GetPositionUpperLimits()
+    prog.AddBoundingBoxConstraint(lower, upper, q_var)
+
+
+    # Solve the optimization problem using Drake’s default solver.
+    # The initial guess is the nominal configuration (q_nominal).
+    result = Solve(prog, q_nominal)
+
+    # Check if the solver succeeded and return the solution.
+    if result.is_success():
+        q_sol = result.GetSolution(q_var)
+        return q_sol
+    else:
+        print("IK did not converge!")
+        return None
+
+
+def run_simulation(sim_time_step):
+    diagram, logger_state, q_target = create_sim_scene(sim_time_step)
+    simulator = Simulator(diagram)
+    simulator_context = simulator.get_mutable_context()
+    simulator.Initialize()
+    simulator.set_target_realtime_rate(1.)
+
+    # Save the block diagram as an image file
+    svg_data = diagram.GetGraphvizString(max_depth=2)
+    graph = pydot.graph_from_dot_data(svg_data)[0]
+    image_path = "figures/block_diagram_03.png"  # Change this path as needed
+    graph.write_png(image_path)
+    print(f"Block diagram saved as: {image_path}")
+    
+    # Run simulation and record for replays in MeshCat
+    meshcat.StartRecording()
+    simulator.AdvanceTo(5.0)  # Adjust this time as needed
+    meshcat.PublishRecording()
+
+    # At the end of the simulation
+    plot_transient_response(logger_state, simulator.get_context(), q_target)
+
+# --------------------------------------------------------------------
+# Run the simulation
+# --------------------------------------------------------------------
+# Try playing with the time step (e.g. 0.001 vs 0.01 vs 0.1)
+run_simulation(sim_time_step=0.01)
+
+
+    
