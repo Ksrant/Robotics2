@@ -109,7 +109,7 @@ class MotionProfile(LeafSystem):
         self.index_path = 0
         self.index_q_next = 0
         self.flag = True
-        self.min_distance = 0.001
+        self.min_distance = 0.01
         # update_period = time_period / self.num_points
         update_period = 1 / 50
         builder = DiagramBuilder()
@@ -119,19 +119,7 @@ class MotionProfile(LeafSystem):
         base_link = plant.GetBodyByName("panda_link0")
         plant.WeldFrames(plant.world_frame(), base_link.body_frame())
 
-        # --- Table ---
-        table_model = plant.AddModelInstance("table_source")
-
-        table_inertia = SpatialInertia(mass=5.0, p_PScm_E=np.zeros(3), G_SP_E=UnitInertia(0.01, 0.01, 0.01))
-        table_body = plant.AddRigidBody("table_top_link", table_model, table_inertia)
-
-        table_shape = DrakeBox(0.4, 0.75, 0.05)
-        plant.RegisterCollisionGeometry(table_body, RigidTransform(), table_shape, "table_collision",
-                                        CoulombFriction(0.3, 0.3))
-        plant.RegisterVisualGeometry(table_body, RigidTransform(), table_shape, "table_visual", [0.82, 0.71, 0.55, 1.0])
-
-        table_pose = RigidTransform(RollPitchYaw(0, 0, 0), [0.55, 0.0, 0.025])
-        plant.WeldFrames(plant.world_frame(), table_body.body_frame(), table_pose)
+        
 
         # --- Wall ---
         wall_model = plant.AddModelInstance("wall")
@@ -153,7 +141,6 @@ class MotionProfile(LeafSystem):
         self.plant_context = diagram.GetMutableSubsystemContext(plant, diagram_context)
         self.plant = plant
         self.diagram = diagram
-        self.table = plant.GetModelInstanceByName("table_source")
         self.wall = plant.GetModelInstanceByName("wall")
         self.robot = plant.GetModelInstanceByName("panda")
         self.num_positions = self.plant.num_positions(self.robot)
@@ -319,6 +306,7 @@ class MotionProfile(LeafSystem):
 
         # Choose the planner (RRT-Connect) and initialize it
         planner = og.RRTConnect(si)  # create planner object
+        planner.setRange(0.5)
         planner.setProblemDefinition(pdef)  # assign start/goal/problem
         planner.setup()  # initialize internal structures
 
@@ -526,7 +514,7 @@ def get_cube_poses(plant, context, cubes_names):
 
         # Translate grasp point slightly above the cube
         p_W = X_WB.translation().copy()
-        p_W[2] += 0.06  # Vertical grasp offset
+        p_W[2] += 0.1  # Vertical grasp offset
 
         # Flip gripper orientation (180° around X-axis)
         poses[cube_name] = RigidTransform(
@@ -615,14 +603,14 @@ def pick_and_place(final_configuration, cube_names ,plant, context):
             # Le cube est libre, on l'envoie direct à sa position finale
             actual_pos_in_memory = current_poses[target_cube].translation()
             pick_z = actual_pos_in_memory.copy()
-            if pick_z[2] < 0.1675:
-                pick_z[2] = 0.168
+            if pick_z[2] < 0.167:
+                pick_z[2] = 0.167
 
             operations.append((target_cube, "pick", RigidTransform(RollPitchYaw(np.pi, 0, 0), pick_z)))
             dest_pos1 = final_configuration[target_cube].translation()
             dest_pos = dest_pos1.copy()
-            if dest_pos[2] < 0.1675:
-                dest_pos[2] = 0.168
+            if dest_pos[2] < 0.167:
+                dest_pos[2] = 0.167
 
             operations.append((target_cube, "place",RigidTransform(RollPitchYaw(np.pi, 0, 0), dest_pos)))
 
@@ -634,8 +622,8 @@ def pick_and_place(final_configuration, cube_names ,plant, context):
             # Le cube voulu est bloqué par 'blocker ' ==> on doit donc dégager le 'blocker' vers une pos intermediaire
 
             blocker_pick_z = current_poses[blocker].translation().copy()
-            if blocker_pick_z[2] < 0.1675:
-                blocker_pick_z[2] = 0.168
+            if blocker_pick_z[2] < 0.167:
+                blocker_pick_z[2] = 0.167
 
             operations.append((blocker, "pick", RigidTransform(RollPitchYaw(np.pi, 0, 0), blocker_pick_z)))
 
@@ -645,7 +633,7 @@ def pick_and_place(final_configuration, cube_names ,plant, context):
             inter_trans = [
                 0.5 + intermediate_x_pattern[pos_in_cycle] * scale * n,  # Offset 0.3 pour éloigner de la tour
                 0.2 + intermediate_y_pattern[pos_in_cycle] * scale * m,
-                0.168 ]
+                0.167 ]
 
             inter_pose = RigidTransform(RollPitchYaw(np.pi, 0, 0), inter_trans)
             operations.append((blocker, "place", inter_pose))
@@ -700,7 +688,7 @@ def create_sim_scene(sim_time_step):
 
     final_configuration = {}
     for i, cube_name in enumerate(desired_order):
-        height = 0.1675 + (i) * 0.025  # minimum  height on the table + stack height
+        height = 0.167 + (i) * 0.025  # minimum  height on the table + stack height
         final_configuration[cube_name] = RigidTransform(RotationMatrix.Identity(),[X_WB_circle.translation()[0], X_WB_circle.translation()[1],height])
 
     # create a sequence that converges to the desired stack on the tagret cylinder
@@ -713,6 +701,7 @@ def create_sim_scene(sim_time_step):
         X = pick_place_sequence[i][2]
         p = X.translation().copy()  # np.array (3,)
         p[2] += offset
+
         #first pt on top of the targer point
         way_pts.append(solve_ik(panda_ik, context_panda_ik, frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p)))
     
@@ -724,8 +713,8 @@ def create_sim_scene(sim_time_step):
         elif pick_place_sequence[i][1] == 'place':
             way_pts.append(gripper_action(target, 0.00))
             way_pts.append(gripper_action(target, 0.04))
-        
-        #way_pts.append(('----', solve_ik(panda_ik, context_panda_ik, frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
+        #last pt on top of the target pt to leave properly
+        way_pts.append(solve_ik(panda_ik, context_panda_ik, frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p)))
 
 
     
@@ -775,7 +764,7 @@ def run_simulation(sim_time_step):
 
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(60.0)  # Adjust this time as needed
+    simulator.AdvanceTo(45.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
