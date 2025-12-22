@@ -107,7 +107,7 @@ class MotionProfile(LeafSystem):
         self.index_path = 0
         self.index_q_next = 0
         self.flag = True
-        self.min_distance = 0.001 # threshold for the colision avoidance
+        self.min_distance = 0.05 # threshold for the colision avoidance
         builder = DiagramBuilder()
         plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.01)
         parser = Parser(plant)
@@ -116,19 +116,6 @@ class MotionProfile(LeafSystem):
         plant.WeldFrames(plant.world_frame(), base_link.body_frame())
 
         
-        # --- Table ---
-        table_model = plant.AddModelInstance("table_source")
-
-        table_inertia = SpatialInertia(mass=5.0,  p_PScm_E=np.zeros(3),G_SP_E=UnitInertia(0.01, 0.01, 0.01))
-        table_body = plant.AddRigidBody("table_top_link", table_model, table_inertia)
-
-        table_shape = DrakeBox(0.4, 0.75, 0.05)
-        plant.RegisterCollisionGeometry(table_body,RigidTransform(),  table_shape,"table_collision",CoulombFriction(0.3, 0.3))
-        plant.RegisterVisualGeometry(table_body,RigidTransform(),table_shape,"table_visual",[0.82, 0.71, 0.55, 1.0]  )
-
-        table_pose = RigidTransform(RollPitchYaw(0, 0,0),[0.55, 0.0, 0.025])
-        plant.WeldFrames(plant.world_frame(), table_body.body_frame(), table_pose)
-
         # --- Wall ---
         wall_model = plant.AddModelInstance("wall")
 
@@ -149,7 +136,6 @@ class MotionProfile(LeafSystem):
         self.plant_context = diagram.GetMutableSubsystemContext(plant, diagram_context)
         self.plant = plant
         self.diagram = diagram
-        self.table = plant.GetModelInstanceByName("table_source")
         self.wall  = plant.GetModelInstanceByName("wall")
         self.robot = plant.GetModelInstanceByName("panda")
         self.num_positions = self.plant.num_positions(self.robot)
@@ -193,18 +179,21 @@ class MotionProfile(LeafSystem):
         
         got_new_task = bool(self.new_task.Eval(context)[0])
         is_done_flag = bool(discrete_state.get_vector(self.is_task_done).GetAtIndex(0))
+        print(is_done_flag , got_new_task)
         if got_new_task and is_done_flag:
+            discrete_state.get_mutable_vector(self.is_task_done).SetAtIndex(0, 0.0)
             self.flag = True
             self.task_number +=1
             print(f"[PP] Updated task index: {self.task_number}")
             self.prev_task_array = task_array.copy()
-            discrete_state.get_mutable_vector(self.is_task_done).SetAtIndex(0, 0.0)
+            #got_new_task = False 
         
-        #discrete_state.get_mutable_vector(self.is_task_done).SetAtIndex(0, 0.0)
+        
 
         
         # Compute trajectory only once
-        if self.flag: 
+        if self.flag:
+            discrete_state.get_mutable_vector(self.is_task_done).SetAtIndex(0, 0.0) 
             num_joints = 9
             way_pts_vec = task_array.reshape(-1, num_joints) 
             self.trajectorys = self.get_trajectorys(way_pts_vec, q_i, 10)
@@ -217,6 +206,7 @@ class MotionProfile(LeafSystem):
 
         # If trajectories exist, follow them
         if self.trajectorys is not None:
+
 
             # Still inside trajectory list?
             if self.index_path < len(self.trajectorys):
@@ -231,7 +221,7 @@ class MotionProfile(LeafSystem):
 
                     
                     # If robot is close enough → go to next waypoint
-                    if np.linalg.norm(q_next - q_i) < 0.1 :
+                    if np.linalg.norm(q_next - q_i) < 0.08 :
                         self.index_q_next += 1
 
 
@@ -353,7 +343,7 @@ class MotionProfile(LeafSystem):
         # Choose the planner (RRT-Connect) and initialize it
         ou.setLogLevel(ou.LOG_NONE)
         planner = og.RRTConnect(si)             # create planner object
-        planner.setRange(2)   # << key smoothing parameter
+        planner.setRange(0.4)   # << key smoothing parameter
         planner.setProblemDefinition(pdef)      # assign start/goal/problem
         planner.setup()                         # initialize internal structures
         
@@ -576,6 +566,7 @@ class TAMPSequencer(LeafSystem):
         
     def update_index(self, context, discrete_state):
         """Periodically check distance to current waypoint and update index."""
+        discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0)
         pp_done = bool(self.is_path_planner_done.Eval(context)[0])
         if pp_done:
             
@@ -592,13 +583,10 @@ class TAMPSequencer(LeafSystem):
 
             # --- Extract Panda joint positions ---
             q_panda = self.plant.GetPositions(self.plant_context, self.robot)
-            # for a better ik
-            #self.panda_ik.SetPositions(self.context_panda_ik, q_panda)
-            #self.frame_E = self.plant.GetFrameByName("panda_hand")
+            
             # --- Check distance to current task waypoint ---
             dist = np.linalg.norm(q_panda - self.tasks[0][-1][1])  # last point in current task
             if dist <= self.tolerance:
-                
                 cubes = get_cube_poses(self.plant,self.plant_context,self.cubes_names)# --- Extract cube poses ---
                 any_cube_moved = False
 
@@ -620,7 +608,6 @@ class TAMPSequencer(LeafSystem):
                             discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 1.0) # we tell to the path planner that a new task is comming
                             self.index += 1
                             print(f"[SEQ] Updated task index: {self.index}")
-                            
                         else:
                             discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0) # nothing to send to the path planner 
 
@@ -645,7 +632,7 @@ class TAMPSequencer(LeafSystem):
 
     def make_task(self, pick_and_place_pts):
         res = [[]]
-        offset = 0.15
+        offset = 0.1
         if len(pick_and_place_pts) > 1:
             X = pick_and_place_pts[0][2] 
             p = X.translation().copy()
@@ -656,17 +643,18 @@ class TAMPSequencer(LeafSystem):
                                              self.frame_E, RigidTransform(X.rotation(), p))))
             res[-1].append(('gripper_open', self.gripper_action(target_pt, 0.04)))
             res[-1].append(('gripper_close', self.gripper_action(target_pt, 0.0001)))
+            
             res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
                                                 self.frame_E, RigidTransform(X.rotation(), p))))
             # force the path planner to avoid the wall
             """
             if pick_and_place_pts[1][2].translation()[1]<0:
-                print("ok")
+
                 res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
                                              self.frame_E, RigidTransform(X.rotation(), [0.5, 0.0, 0.7]))))
             else:
                 res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                                self.frame_E, RigidTransform(X.rotation(), p))))
+                                              self.frame_E, RigidTransform(X.rotation(), p))))
             """
             # --- PLACE ---
             X = pick_and_place_pts[1][2]
@@ -681,45 +669,7 @@ class TAMPSequencer(LeafSystem):
             res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
                                              self.frame_E, RigidTransform(X.rotation(), p))))
         return res
-    
-    def make_tasks(self, pick_and_place_pts):
-        """Convert pick/place poses into a structured task list."""
-        res = []
-        offset = 0.7
-        for i in range(0, len(pick_and_place_pts), 2):
-            res.append([])
 
-            # --- PICK ---
-            X = pick_and_place_pts[i][2]
-            p = X.translation().copy()
-            p[2] += offset
-            if p[2] < 0.1675:
-                p[2] = 0.1675
-            target_pt = solve_ik(self.panda_ik, self.context_panda_ik,
-                                 self.frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), X.translation()))
-            res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                             self.frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
-            res[-1].append(('gripper_open', self.gripper_action(target_pt, 0.04)))
-            res[-1].append(('gripper_close', self.gripper_action(target_pt, 0.0001)))
-            res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                             self.frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
-
-            # --- PLACE ---
-            X = pick_and_place_pts[i+1][2]
-            p = X.translation().copy()
-            p[2] += offset
-            if p[2] < 0.1675:
-                p[2] = 0.1675
-            target_pt = solve_ik(self.panda_ik, self.context_panda_ik,
-                                 self.frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), X.translation()))
-            res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                             self.frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
-            res[-1].append(('gripper_close', self.gripper_action(target_pt, 0.0001)))
-            res[-1].append(('gripper_open', self.gripper_action(target_pt, 0.04)))
-            res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                             self.frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p))))
-
-        return res
 
 def get_cube_poses(plant, context,cubes_names):
     
@@ -735,20 +685,27 @@ def get_cube_poses(plant, context,cubes_names):
             p[2] += 0.105
         else:
             p[2] += 0.035
-        poses[link_name] = RigidTransform(X_WB.rotation(), p)
+        R = RotationMatrix(RollPitchYaw(np.pi,0,0))
+        if np.abs(p[1]) < 0.1:
+            R = RotationMatrix(RollPitchYaw(np.pi,0,np.pi/2))
+        poses[link_name] = RigidTransform(R, p)
+
 
     return poses
 
-def pick_and_place(final_configuration, plant, context,cubes_names):
+def pick_and_place(desired_config, plant, context,cubes_names):
 
+    final_configuration = desired_config.copy()
     current_poses = get_cube_poses(plant, context,cubes_names)
     # edit the final configuration to adapte it to incertaintys
     for key in list(final_configuration.keys()):
-        if np.linalg.norm(current_poses[key].translation() -final_configuration[key].translation()) < 0.035:
+        if np.linalg.norm(current_poses[key].translation() -final_configuration[key].translation()) < 0.01:
+            #we concider that the cube is placed.
             final_configuration.pop(key)
+            current_poses.pop(key)
 
     operations = []
-    R_zdown = RotationMatrix(RollPitchYaw(np.pi, 0, 0))
+    
     # Paramètres zone intermédiaire
     intermediate_amount = 0
     m, n = 0.075, 0.075
@@ -792,7 +749,7 @@ def pick_and_place(final_configuration, plant, context,cubes_names):
             pick_z = actual_pos_in_memory.copy()
             
 
-            operations.append((target_cube, "pick", RigidTransform(R_zdown.multiply(current_poses[target_cube].rotation()), pick_z)))
+            operations.append((target_cube, "pick", RigidTransform(current_poses[target_cube].rotation(), pick_z)))
             dest_pos1 = final_configuration[target_cube].translation()
             dest_pos = dest_pos1.copy()
             
@@ -808,7 +765,7 @@ def pick_and_place(final_configuration, plant, context,cubes_names):
 
             blocker_pick_z = current_poses[blocker].translation().copy()
 
-            operations.append((blocker, "pick", RigidTransform(R_zdown.multiply(current_poses[blocker].rotation()), blocker_pick_z)))
+            operations.append((blocker, "pick", RigidTransform(current_poses[blocker].rotation(), blocker_pick_z)))
 
             # Calcul position intermédiaire
             while True:
@@ -816,8 +773,8 @@ def pick_and_place(final_configuration, plant, context,cubes_names):
                 scale = (intermediate_amount // 8) + 1
 
                 inter_trans = np.array([
-                    0.5 + intermediate_x_pattern[pos_in_cycle] * scale * n,
-                    0.2 + intermediate_y_pattern[pos_in_cycle] * scale * m,
+                    blocker_pick_z[0] + intermediate_x_pattern[pos_in_cycle] * scale * n,
+                    blocker_pick_z[1] + intermediate_y_pattern[pos_in_cycle] * scale * m,
                     0.1675
                 ])
 
@@ -865,7 +822,7 @@ def create_sim_scene(sim_time_step):
     AddDefaultVisualization(builder=builder, meshcat=meshcat)
     
 
-    desired_order = ["green_link","blue_link","red_link"] 
+    desired_order = ["red_link","green_link","blue_link"] 
     cylinder_target_body = plant.GetBodyByName("link_target",plant.GetModelInstanceByName("cylinder_target"))
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
     
@@ -925,7 +882,7 @@ def run_simulation(sim_time_step):
     
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(100.0)  # Adjust this time as needed
+    simulator.AdvanceTo(200.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
