@@ -107,7 +107,7 @@
 
 
     <model name="green_cube">
-      <pose>0.5 0.25 0.0895 0 0 0</pose>
+      <pose>0.5 0.25 0.0885 0 0 0</pose>
       <link name="green_link">
         <inertial>
           <mass>0.1</mass>
@@ -145,7 +145,7 @@
     </model>
 
     <model name="blue_cube">
-      <pose>0.5 0.25 0.1155 0 0 0</pose>
+      <pose>0.5 0.25 0.1135 0 0 0</pose>
       <link name="blue_link">
         <inertial>
           <mass>0.1</mass>
@@ -177,6 +177,122 @@
           </geometry>
           <material>
             <diffuse>0.2 0.2 0.8 1.0</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+
+    <!-- Second stack of cubes -->
+    <model name="yellow_cube">
+      <pose>0.5 0.25 0.1485 0 0 0</pose>
+      <link name="yellow_link">
+        <inertial>
+          <mass>0.1</mass>
+          <inertia>
+            <ixx>5e-5</ixx>
+            <iyy>5e-5</iyy>
+            <izz>5e-5</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.025 0.025 0.025</size>
+            </box>
+          </geometry>
+          <drake:proximity_properties>
+            <drake:mu_dynamic>1</drake:mu_dynamic>
+            <drake:mu_static>1</drake:mu_static>
+          </drake:proximity_properties>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.025 0.025 0.025</size>
+            </box>
+          </geometry>
+          <material>
+            <diffuse>0.9 0.9 0.2 1.0</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="purple_cube">
+      <pose>0.5 0.25 0.1635 0 0 0</pose>
+      <link name="purple_link">
+        <inertial>
+          <mass>0.1</mass>
+          <inertia>
+            <ixx>5e-5</ixx>
+            <iyy>5e-5</iyy>
+            <izz>5e-5</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.025 0.025 0.025</size>
+            </box>
+          </geometry>
+          <drake:proximity_properties>
+            <drake:mu_dynamic>1</drake:mu_dynamic>
+            <drake:mu_static>1</drake:mu_static>
+          </drake:proximity_properties>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.025 0.025 0.025</size>
+            </box>
+          </geometry>
+          <material>
+            <diffuse>0.6 0.2 0.8 1.0</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="cyan_cube">
+      <pose>0.5 0.25 0.1885 0 0 0</pose>
+      <link name="cyan_link">
+        <inertial>
+          <mass>0.1</mass>
+          <inertia>
+            <ixx>5e-5</ixx>
+            <iyy>5e-5</iyy>
+            <izz>5e-5</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.025 0.025 0.025</size>
+            </box>
+          </geometry>
+          <drake:proximity_properties>
+            <drake:mu_dynamic>1</drake:mu_dynamic>
+            <drake:mu_static>1</drake:mu_static>
+          </drake:proximity_properties>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.025 0.025 0.025</size>
+            </box>
+          </geometry>
+          <material>
+            <diffuse>0.2 0.8 0.8 1.0</diffuse>
           </material>
         </visual>
       </link>
