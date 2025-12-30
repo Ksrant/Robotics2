@@ -107,7 +107,7 @@ class MotionProfile(LeafSystem):
         self.index_path = 0
         self.index_q_next = 0
         self.flag = True
-        self.min_distance = 0.05 # threshold for the colision avoidance
+        self.min_distance = 0.025 # threshold for the colision avoidance
         builder = DiagramBuilder()
         plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.01)
         parser = Parser(plant)
@@ -179,7 +179,7 @@ class MotionProfile(LeafSystem):
         
         got_new_task = bool(self.new_task.Eval(context)[0])
         is_done_flag = bool(discrete_state.get_vector(self.is_task_done).GetAtIndex(0))
-        print(is_done_flag , got_new_task)
+        
         if got_new_task and is_done_flag:
             discrete_state.get_mutable_vector(self.is_task_done).SetAtIndex(0, 0.0)
             self.flag = True
@@ -221,7 +221,7 @@ class MotionProfile(LeafSystem):
 
                     
                     # If robot is close enough → go to next waypoint
-                    if np.linalg.norm(q_next - q_i) < 0.08 :
+                    if np.linalg.norm(q_next - q_i) < 0.1 :
                         self.index_q_next += 1
 
 
@@ -516,7 +516,7 @@ class TAMPSequencer(LeafSystem):
     Accepts the full plant state and extracts Panda + cubes in real-time.
     """
 
-    def __init__(self, panda_ik, plant,desired_order,X_WB_target,cube_names, update_period=1/50, tolerance=0.086):
+    def __init__(self, panda_ik, plant,desired_order,X_WB_target,cube_names, update_period=1/50, tolerance=0.1):
         super().__init__()
 
         # Plant and IK
@@ -586,6 +586,7 @@ class TAMPSequencer(LeafSystem):
             
             # --- Check distance to current task waypoint ---
             dist = np.linalg.norm(q_panda - self.tasks[0][-1][1])  # last point in current task
+            
             if dist <= self.tolerance:
                 cubes = get_cube_poses(self.plant,self.plant_context,self.cubes_names)# --- Extract cube poses ---
                 any_cube_moved = False
@@ -595,7 +596,7 @@ class TAMPSequencer(LeafSystem):
                     if cube_name not in self.prev_cube_pose:
                         self.prev_cube_pose[cube_name] = cube_position
                         continue
-                    if np.linalg.norm(cube_position - self.prev_cube_pose[cube_name]) > 1e-5:
+                    if np.linalg.norm(cube_position - self.prev_cube_pose[cube_name]) > 1e-4:
                         any_cube_moved = True
                         self.prev_cube_pose[cube_name] = cube_position
 
@@ -686,8 +687,8 @@ def get_cube_poses(plant, context,cubes_names):
         else:
             p[2] += 0.035
         R = RotationMatrix(RollPitchYaw(np.pi,0,0))
-        if np.abs(p[1]) < 0.1:
-            R = RotationMatrix(RollPitchYaw(np.pi,0,np.pi/2))
+        #if np.abs(p[1]) < 0.2:
+        #   R = RotationMatrix(RollPitchYaw(np.pi,0,np.pi/2))
         poses[link_name] = RigidTransform(R, p)
 
 
@@ -699,7 +700,7 @@ def pick_and_place(desired_config, plant, context,cubes_names):
     current_poses = get_cube_poses(plant, context,cubes_names)
     # edit the final configuration to adapte it to incertaintys
     for key in list(final_configuration.keys()):
-        if np.linalg.norm(current_poses[key].translation() -final_configuration[key].translation()) < 0.01:
+        if np.linalg.norm(current_poses[key].translation() -final_configuration[key].translation()) < 0.0075:
             #we concider that the cube is placed.
             final_configuration.pop(key)
             current_poses.pop(key)
@@ -708,9 +709,9 @@ def pick_and_place(desired_config, plant, context,cubes_names):
     
     # Paramètres zone intermédiaire
     intermediate_amount = 0
-    m, n = 0.075, 0.075
-    intermediate_x_pattern = [1, -1, 0, 0, -1, 1, 1, 0]
-    intermediate_y_pattern = [0, 0, 1, -1, 1, 1, -1, -1]
+    n,m = 0.075, 0.075
+    intermediate_x_pattern = [-1,-1, 0, 1,1]
+    intermediate_y_pattern = [ 0, 1, 1, 1 ,0]
 
     # On crée une liste des cubes à placer (dans l'ordre du bas vers le haut)
     # final_configuration doit être ordonnée : [cube_bas, cube_milieu, cube_haut]
@@ -769,8 +770,8 @@ def pick_and_place(desired_config, plant, context,cubes_names):
 
             # Calcul position intermédiaire
             while True:
-                pos_in_cycle = intermediate_amount % 8
-                scale = (intermediate_amount // 8) + 1
+                pos_in_cycle = intermediate_amount % 5
+                scale = (intermediate_amount // 5) + 1
 
                 inter_trans = np.array([
                     blocker_pick_z[0] + intermediate_x_pattern[pos_in_cycle] * scale * n,
@@ -780,7 +781,11 @@ def pick_and_place(desired_config, plant, context,cubes_names):
 
                 occupied = False
                 for pose in current_poses.values():
-                    if np.linalg.norm(pose.translation() - inter_trans) < 0.04:
+                    if np.linalg.norm(pose.translation() - inter_trans) < 0.04  :
+                        occupied = True
+                        break
+                    # take into accont the table size
+                    if inter_trans[0] < 0.55 - 0.4/2 or inter_trans[0] > 0.55 + 0.4/2 or abs(inter_trans[1]) > 0.75/2 :
                         occupied = True
                         break
 
@@ -788,9 +793,14 @@ def pick_and_place(desired_config, plant, context,cubes_names):
                     break
 
                 intermediate_amount += 1
-
-
-            inter_pose = RigidTransform(RollPitchYaw(np.pi, 0, 0), inter_trans)
+            inter_ori = RotationMatrix(RollPitchYaw(np.pi,0,0))
+            """
+            if abs(inter_trans[1]) < 0.5 :
+                inter_ori = RotationMatrix(RollPitchYaw(np.pi,0,np.pi/2))
+            else:
+                inter_ori = RotationMatrix(RollPitchYaw(np.pi,0,0))
+            """
+            inter_pose = RigidTransform(inter_ori, inter_trans)
             operations.append((blocker, "place", inter_pose))
             current_poses[blocker] = inter_pose
             intermediate_amount += 1
@@ -821,13 +831,14 @@ def create_sim_scene(sim_time_step):
     # Add visualization to see the geometries in MeshCat
     AddDefaultVisualization(builder=builder, meshcat=meshcat)
     
+    cubes = ["blue_link","cyan_link","green_link","purple_link","yellow_link","red_link"]
 
-    desired_order = ["red_link","green_link","blue_link"] 
+    desired_order = ["purple_link","blue_link","cyan_link","yellow_link","red_link","green_link"] 
     cylinder_target_body = plant.GetBodyByName("link_target",plant.GetModelInstanceByName("cylinder_target"))
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
     
 
-    cubes = ["blue_link","green_link","red_link" ]
+    
     """
     for i in range(plant.num_output_ports()):
         port = plant.get_output_port(i)
@@ -882,7 +893,7 @@ def run_simulation(sim_time_step):
     
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(200.0)  # Adjust this time as needed
+    simulator.AdvanceTo(150.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
