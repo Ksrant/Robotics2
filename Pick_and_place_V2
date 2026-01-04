@@ -25,20 +25,16 @@ from helper.dynamics import CalcRobotDynamics
 from pydrake.all import (InverseKinematics, Solve,SpatialInertia, UnitInertia,RigidTransform, CoulombFriction)
 from pydrake.systems.framework import LeafSystem, BasicVector
 from pydrake.trajectories import PiecewisePolynomial
-
+from collections import defaultdict, deque
 
 # Start the visualizer and clean up previous instances
 meshcat = StartMeshcat()
 meshcat.Delete()
 meshcat.DeleteAddedControls()
 
-
 # Path to Panda robot URDF and the world SDF
 world_path = os.path.join("..", "models", "descriptions", "project_06_TAMP.sdf")
-robot_path = os.path.join("..", "models", "descriptions", "robots", "arms",
-                          "franka_description", "urdf", "panda_arm_hand.urdf")
-
-
+robot_path = os.path.join("..", "models", "descriptions", "robots", "arms","franka_description", "urdf", "panda_arm_hand.urdf")
 
 ######################################################################################################
 #                             ########Define PD+G Controller as a LeafSystem #######   
@@ -85,10 +81,10 @@ class Controller(LeafSystem):
         # Update the output port = state
         discrete_state.get_mutable_vector().SetFromVector(tau)
 
-
 ######################################################################################################
 #                     ########Define Trajectory Generator as a LeafSystem #######   
 ######################################################################################################
+
 class JointSpaceValidityChecker(ob.StateValidityChecker):
     def __init__(self, si, check_fn, num_dof):
         super().__init__(si)
@@ -98,6 +94,8 @@ class JointSpaceValidityChecker(ob.StateValidityChecker):
     def isValid(self, state):
         q = np.array([state[i] for i in range(self.num_dof)])
         return self.check_fn(q)
+
+######################################################################################################
 
 class MotionProfile(LeafSystem):
     def __init__(self,update_period=1/50 ):
@@ -221,7 +219,7 @@ class MotionProfile(LeafSystem):
 
                     
                     # If robot is close enough → go to next waypoint
-                    if np.linalg.norm(q_next - q_i) < 0.1 :
+                    if np.linalg.norm(q_next - q_i) < 0.2 :
                         self.index_q_next += 1
 
 
@@ -357,6 +355,7 @@ class MotionProfile(LeafSystem):
             # Simplify the path by shortcutting redundant waypoints
             simplifier = og.PathSimplifier(si)
             simplifier.ropeShortcutPath(path)
+            #simplifier.smoothBSpline(path)
 
             # Interpolate to obtain evenly spaced samples along the path
             path.interpolate(self.num_points)
@@ -404,111 +403,8 @@ class MotionProfile(LeafSystem):
         return self.traj
 
 ######################################################################################################
-
-def plot_joint_tracking(logger_state, logger_traj, simulator_context, num_joints=9):
-    """
-    Plot actual vs reference joint positions and velocities from logs.
-    """
-    log_state = logger_state.FindLog(simulator_context)
-    log_traj = logger_traj.FindLog(simulator_context)
-
-    time = log_state.sample_times()
-    q_actual = log_state.data()[:num_joints, :]
-    qdot_actual = log_state.data()[num_joints:, :]
-
-    q_ref = log_traj.data()[:num_joints, :]
-
-    # --- Joint positions ---
-    fig, axes = plt.subplots(7, 1, figsize=(12, 14), sharex=True)
-    for i in range(7):
-        axes[i].plot(time, q_actual[i, :], label='q_actual')
-        axes[i].plot(time, q_ref[i, :], '--', label='q_ref')
-        axes[i].set_ylabel(f'Joint {i+1} [rad]')
-        axes[i].legend()
-        axes[i].grid(True)
-        axes[i].set_ylim(-3, 3)
-    axes[-1].set_xlabel('Time [s]')
-    fig.suptitle('Joint Positions: Actual vs Reference')
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
-    plt.show()
-
-def make_panda_ik(panda_path,time_step):
-    plant = MultibodyPlant(time_step)
-    parser = Parser(plant)
-    parser.AddModelsFromUrl("file://" + os.path.abspath(panda_path))
-  
-    base = plant.GetBodyByName("panda_link0")
-    plant.WeldFrames(plant.world_frame(), base.body_frame())
-    
-    plant.Finalize()
-    return plant
-
-def solve_ik(plant, context, frame_E, X_WE_desired):
-    """
-    Solves inverse kinematics for a given end-effector pose.
-
-    Args:
-        plant: MultibodyPlant
-        context: plant.CreateDefaultContext() or similar
-        frame_E: End-effector Frame (e.g. plant.GetFrameByName("ee"))
-        X_WE_desired: RigidTransform of desired world pose of end-effector
-
-    Returns:
-        q_solution: numpy array of joint positions if successful, else None
-    """
-    ik = InverseKinematics(plant, context)
-
-    # Set nominal joint positions to current positions
-    q_nominal = plant.GetPositions(context).reshape((-1, 1))
-
-    
-    # Constrain position and orientation
-    # Position constraint
-    p_AQ = X_WE_desired.translation().reshape((3, 1))
-    ik.AddPositionConstraint(
-        frameB=frame_E,
-        p_BQ=np.zeros((3, 1)),  # Here, p_BQ = [0, 0, 0] means we’re constraining the origin of the E frame.
-        frameA=plant.world_frame(),
-        p_AQ_lower=p_AQ,
-        p_AQ_upper=p_AQ
-    )
-
-    # Orientation constraint
-    theta_bound = 1e-10  # radians
-    ik.AddOrientationConstraint(
-        frameAbar=plant.world_frame(),      # world frame
-        R_AbarA=X_WE_desired.rotation(),    # desired orientation
-        frameBbar=frame_E,                  # end-effector frame
-        R_BbarB=RotationMatrix(),           # current orientation
-        theta_bound=theta_bound             # allowable deviation
-    )
-
-    # Access the underlying MathematicalProgram to add costs and constraints manually.
-    prog = ik.prog()
-    q_var = ik.q()  # decision variables (joint angles)
-    # Add a quadratic cost to stay close to the nominal configuration:
-    #   cost = (q - q_nominal)^T * W * (q - q_nominal)
-    W = np.identity(q_nominal.shape[0])
-    prog.AddQuadraticErrorCost(W, q_nominal, q_var)
-
-    # Enforce joint position limits from the robot model.
-    lower = plant.GetPositionLowerLimits()
-    upper = plant.GetPositionUpperLimits()
-    prog.AddBoundingBoxConstraint(lower, upper, q_var)
-
-
-    # Solve the optimization problem using Drake’s default solver.
-    # The initial guess is the nominal configuration (q_nominal).
-    result = Solve(prog, q_nominal)
-
-    # Check if the solver succeeded and return the solution.
-    if result.is_success():
-        q_sol = result.GetSolution(q_var)
-        return q_sol
-    else:
-        print("IK did not converge!")
-        return None
-
+#                     ########Define TAMP sequencer as a LeafSystem #######   
+######################################################################################################
 
 class TAMPSequencer(LeafSystem):
     """
@@ -516,7 +412,7 @@ class TAMPSequencer(LeafSystem):
     Accepts the full plant state and extracts Panda + cubes in real-time.
     """
 
-    def __init__(self, panda_ik, plant,desired_order,X_WB_target,cube_names, update_period=1/50, tolerance=0.1):
+    def __init__(self, panda_ik, plant,desired_order,X_WB_target,cube_names, update_period=1/50, tolerance=0.3):
         super().__init__()
 
         # Plant and IK
@@ -596,7 +492,7 @@ class TAMPSequencer(LeafSystem):
                     if cube_name not in self.prev_cube_pose:
                         self.prev_cube_pose[cube_name] = cube_position
                         continue
-                    if np.linalg.norm(cube_position - self.prev_cube_pose[cube_name]) > 1e-4:
+                    if np.linalg.norm(cube_position - self.prev_cube_pose[cube_name]) > 1e-3:
                         any_cube_moved = True
                         self.prev_cube_pose[cube_name] = cube_position
 
@@ -647,16 +543,6 @@ class TAMPSequencer(LeafSystem):
             
             res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
                                                 self.frame_E, RigidTransform(X.rotation(), p))))
-            # force the path planner to avoid the wall
-            """
-            if pick_and_place_pts[1][2].translation()[1]<0:
-
-                res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                             self.frame_E, RigidTransform(X.rotation(), [0.5, 0.0, 0.7]))))
-            else:
-                res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                              self.frame_E, RigidTransform(X.rotation(), p))))
-            """
             # --- PLACE ---
             X = pick_and_place_pts[1][2]
             p = X.translation().copy()
@@ -671,7 +557,120 @@ class TAMPSequencer(LeafSystem):
                                              self.frame_E, RigidTransform(X.rotation(), p))))
         return res
 
+#plot joint tracking
+def plot_joint_tracking(logger_state, logger_traj, simulator_context, num_joints=9):
+    """
+    Plot actual vs reference joint positions and velocities from logs.
+    """
+    log_state = logger_state.FindLog(simulator_context)
+    log_traj = logger_traj.FindLog(simulator_context)
 
+    time = log_state.sample_times()
+    q_actual = log_state.data()[:num_joints, :]
+    qdot_actual = log_state.data()[num_joints:, :]
+
+    q_ref = log_traj.data()[:num_joints, :]
+
+    # --- Joint positions ---
+    fig, axes = plt.subplots(7, 1, figsize=(12, 14), sharex=True)
+    for i in range(7):
+        axes[i].plot(time, q_actual[i, :], label='q_actual')
+        axes[i].plot(time, q_ref[i, :], '--', label='q_ref')
+        axes[i].set_ylabel(f'Joint {i+1} [rad]')
+        axes[i].legend()
+        axes[i].grid(True)
+        axes[i].set_ylim(-3, 3)
+    axes[-1].set_xlabel('Time [s]')
+    fig.suptitle('Joint Positions: Actual vs Reference')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.show()
+
+# function to make a panda model for the Ik 
+def make_panda_ik(panda_path, time_step):
+    # Create the multibody system (robot model)
+    plant = MultibodyPlant(time_step)
+
+    # Load the Panda robot model into the plant
+    parser = Parser(plant)
+    parser.AddModelsFromUrl("file://" + os.path.abspath(panda_path))
+
+    # Fix the robot base to the world frame
+    base = plant.GetBodyByName("panda_link0")
+    plant.WeldFrames(plant.world_frame(), base.body_frame())
+
+    # Lock the model before using it (IK, dynamics, etc.)
+    plant.Finalize()
+
+    return plant
+
+# solve Ik as an optimisation problem
+def solve_ik(plant, context, frame_E, X_WE_desired):
+    """
+    Solves inverse kinematics for a given end-effector pose.
+
+    Args:
+        plant: MultibodyPlant
+        context: plant.CreateDefaultContext() or similar
+        frame_E: End-effector Frame (e.g. plant.GetFrameByName("ee"))
+        X_WE_desired: RigidTransform of desired world pose of end-effector
+
+    Returns:
+        q_solution: numpy array of joint positions if successful, else None
+    """
+    ik = InverseKinematics(plant, context)
+
+    # Set nominal joint positions to current positions
+    q_nominal = plant.GetPositions(context).reshape((-1, 1))
+
+    
+    # Constrain position and orientation
+    # Position constraint
+    p_AQ = X_WE_desired.translation().reshape((3, 1))
+    ik.AddPositionConstraint(
+        frameB=frame_E,
+        p_BQ=np.zeros((3, 1)),  # Here, p_BQ = [0, 0, 0] means we’re constraining the origin of the E frame.
+        frameA=plant.world_frame(),
+        p_AQ_lower=p_AQ,
+        p_AQ_upper=p_AQ
+    )
+
+    # Orientation constraint
+    theta_bound = 1e-10  # radians
+    ik.AddOrientationConstraint(
+        frameAbar=plant.world_frame(),      # world frame
+        R_AbarA=X_WE_desired.rotation(),    # desired orientation
+        frameBbar=frame_E,                  # end-effector frame
+        R_BbarB=RotationMatrix(),           # current orientation
+        theta_bound=theta_bound             # allowable deviation
+    )
+
+    # Access the underlying MathematicalProgram to add costs and constraints manually.
+    prog = ik.prog()
+    q_var = ik.q()  # decision variables (joint angles)
+    # Add a quadratic cost to stay close to the nominal configuration:
+    #   cost = (q - q_nominal)^T * W * (q - q_nominal)
+    W = np.identity(q_nominal.shape[0])
+    prog.AddQuadraticErrorCost(W, q_nominal, q_var)
+
+    # Enforce joint position limits from the robot model.
+    lower = plant.GetPositionLowerLimits()
+    upper = plant.GetPositionUpperLimits()
+    prog.AddBoundingBoxConstraint(lower, upper, q_var)
+
+
+    # Solve the optimization problem using Drake’s default solver.
+    # The initial guess is the nominal configuration (q_nominal).
+    result = Solve(prog, q_nominal)
+
+    # Check if the solver succeeded and return the solution.
+    if result.is_success():
+        q_sol = result.GetSolution(q_var)
+        return q_sol
+    else:
+        print("IK did not converge!")
+        return None
+
+# get the position of cubes on the world
 def get_cube_poses(plant, context,cubes_names):
     
     poses = {}
@@ -694,6 +693,7 @@ def get_cube_poses(plant, context,cubes_names):
 
     return poses
 
+# algorithm to generate a coherant sequence of pick and place sequence
 def pick_and_place(desired_config, plant, context,cubes_names):
 
     final_configuration = desired_config.copy()
@@ -710,8 +710,8 @@ def pick_and_place(desired_config, plant, context,cubes_names):
     # Paramètres zone intermédiaire
     intermediate_amount = 0
     n,m = 0.075, 0.075
-    intermediate_x_pattern = [-1,-1, 0, 1,1]
-    intermediate_y_pattern = [ 0, 1, 1, 1 ,0]
+    intermediate_x_pattern = [-1,-1, 1,1,0]
+    intermediate_y_pattern = [ 0, 1, 1 ,0,1]
 
     # On crée une liste des cubes à placer (dans l'ordre du bas vers le haut)
     # final_configuration doit être ordonnée : [cube_bas, cube_milieu, cube_haut]
@@ -737,8 +737,8 @@ def pick_and_place(desired_config, plant, context,cubes_names):
 
             other_pos = other_pose.translation()
             # Si un cube est au-dessus (même XY, Z plus grand)
-            if (abs(current_pos[0] - other_pos[0]) < 0.05 and
-                    abs(current_pos[1] - other_pos[1]) < 0.05 and
+            if (abs(current_pos[0] - other_pos[0]) < 0.075 and
+                    abs(current_pos[1] - other_pos[1]) < 0.075 and
                     other_pos[2] > current_pos[2]):
                 blocker = other
                 break
@@ -807,6 +807,111 @@ def pick_and_place(desired_config, plant, context,cubes_names):
 
     return operations
 
+# algorithm to check contradition in consytraints given by the user
+def creates_cycle(constraints, top, bottom):
+    """
+    Check whether adding (top on bottom) would create a cycle.
+    This is done by seeing if 'bottom' is already reachable from 'top'.
+    """
+    stack = [top]
+    visited = set()
+
+    while stack:
+        current = stack.pop()
+        if current == bottom:
+            return True  # cycle detected
+        visited.add(current)
+
+        # Explore cubes that depend on the current cube
+        stack += [
+            t for t, b in constraints
+            if b == current and t not in visited
+        ]
+
+    return False
+
+# interactive stacking constraints translator
+def target_stacking(colors):
+    """
+    Interactively builds stacking constraints and computes
+    a valid stacking order using topological sorting.
+    """
+
+    # Static variable to store constraints across function calls
+    if not hasattr(target_stacking, "constraints"):
+        target_stacking.constraints = []
+    if not hasattr(target_stacking, "default_order"):
+        target_stacking.default_order = [c + "_link" for c in colors]
+
+    
+
+    user_input = input().strip()
+    desired_order = [[], [True]]
+
+    # Exit conditions
+    if user_input.lower() == "none":
+        desired_order[0] = target_stacking.default_order
+        print("Final stacking order (bottom → top):")
+        print(desired_order[0])
+        desired_order[1] = False
+        return desired_order
+    elif user_input.lower() == "end":
+        desired_order[1] = False
+    
+    else:
+        # Parse user input
+        tokens = user_input.split("?")[:-1]
+        if len(tokens) != 3:
+            print("Invalid constraint syntax")
+            return desired_order
+        top, bottom = tokens[1], tokens[2]
+
+        if top not in colors or bottom not in colors:
+            print("Invalid 1st or 2nd color name")
+            return desired_order
+
+        # Check for contradictions
+        if creates_cycle(target_stacking.constraints, top, bottom):
+            print("Contradictory constraint detected :-( please restart.")
+            target_stacking.constraints = []
+            return desired_order
+
+        # Constraint is valid → store it
+        target_stacking.constraints.append((top, bottom))
+
+
+    # Build dependency graph
+    graph = defaultdict(list)
+    indegree = {c: 0 for c in colors}
+
+    for t, b in target_stacking.constraints:
+        graph[b].append(t)
+        indegree[t] += 1
+
+    # Only cubes that appear in constraints are considered
+    constrained = {c for pair in target_stacking.constraints for c in pair}
+
+    queue = deque(c for c in constrained if indegree[c] == 0)
+
+    # TOPOLOGICAL SORT (KAHN)
+    while queue:
+        cube = queue.popleft()
+        desired_order[0].append(cube + "_link")
+
+        for dependent in graph[cube]:
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                queue.append(dependent)
+
+    # final consistency check
+    if len(desired_order[0]) > len(colors):
+        print("Conflicting constraints detected :-( please restart.")
+        target_stacking.constraints = []
+        return [[], [True]]
+
+    print("Final stacking order (bottom → top):")
+    print(desired_order[0])
+    return desired_order
 
 # Function to Create Simulation Scene
 def create_sim_scene(sim_time_step):   
@@ -831,21 +936,33 @@ def create_sim_scene(sim_time_step):
     # Add visualization to see the geometries in MeshCat
     AddDefaultVisualization(builder=builder, meshcat=meshcat)
     
-    cubes = ["blue_link","cyan_link","green_link","purple_link","yellow_link","red_link"]
+    #define cube  names as in the SDF file
+    cubes = ["blue_link","green_link","red_link"]
 
-    desired_order = ["purple_link","blue_link","cyan_link","yellow_link","red_link","green_link"] 
+    #get the desired stacking cylinder position
     cylinder_target_body = plant.GetBodyByName("link_target",plant.GetModelInstanceByName("cylinder_target"))
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
     
-
+    #define cubes color for user
+    colors = ["red", "green", "blue"]
     
-    """
-    for i in range(plant.num_output_ports()):
-        port = plant.get_output_port(i)
-        print(i, port.get_name())
-    """
+    #instruction message for the user
+    print("available cubes color:", *(c for c in colors))
+    print("Enter stacking constraints as: on?(A)?(B)")
+    print("Meaning: cube A must be placed on top of cube B")
+    print("Enter 'none' for default stacking order")
+    print("Enter 'end' once you are done with all constraints")
+
+    # Interactive loop
+    out = True
+    order = []
+    while out:
+        order , out = target_stacking(colors)
+        if out:
+            print("Enter the new constraint on the same format")
+    
    # Add TAMPSequencer and Pathplanner to controller  regulate the robot  
-    sequencer = builder.AddSystem(TAMPSequencer(panda_ik=panda_ik,plant=plant,desired_order=desired_order,X_WB_target=X_WB_circle,cube_names=cubes))
+    sequencer = builder.AddSystem(TAMPSequencer(panda_ik=panda_ik,plant=plant,desired_order=order,X_WB_target=X_WB_circle,cube_names=cubes))
     path_planner = builder.AddNamedSystem("Motion Profile",MotionProfile())
     controller = builder.AddNamedSystem("PD+G controller", Controller(plant, robot))
     
