@@ -1,4 +1,3 @@
-
 import os
 import numpy as np
 from ompl import base as ob
@@ -37,7 +36,6 @@ meshcat.DeleteAddedControls()
 world_path = os.path.join("..", "models", "descriptions", "project_06_TAMP.sdf")
 robot_path = os.path.join("..", "models", "descriptions", "robots", "arms",
                           "franka_description", "urdf", "panda_arm_hand.urdf")
-
 
 ######################################################################################################
 #                       ########Define PD+G Controller as a LeafSystem #######
@@ -85,7 +83,6 @@ class Controller(LeafSystem):
         # Update the output port = state
         discrete_state.get_mutable_vector().SetFromVector(tau)
 
-
 ######################################################################################################
 #                     ########Define Trajectory Generator as a LeafSystem #######
 ######################################################################################################
@@ -99,6 +96,7 @@ class JointSpaceValidityChecker(ob.StateValidityChecker):
         q = np.array([state[i] for i in range(self.num_dof)])
         return self.check_fn(q)
 
+######################################################################################################
 
 class MotionProfile(LeafSystem):
     def __init__(self, waypoints):
@@ -110,7 +108,7 @@ class MotionProfile(LeafSystem):
         self.index_path = 0
         self.index_q_next = 0
         self.flag = True
-        self.min_distance = 0.01
+        self.min_distance = 0.05
         # update_period = time_period / self.num_points
         update_period = 1 / 50
         builder = DiagramBuilder()
@@ -370,7 +368,6 @@ class MotionProfile(LeafSystem):
             self.traj.append(path)
         return self.traj
 
-
 ####################################### Utilitie functions ############################################
 
 def plot_joint_tracking(logger_state, logger_traj, simulator_context, num_joints=9):
@@ -554,11 +551,7 @@ def gripper_action(pt, offset):
 
     return p
 
-
-######################################################################################################
-#                     ########Define Pick and place sequence generator #######
-######################################################################################################
-
+#Pick and place sequence generator 
 def pick_and_place(final_configuration, cube_names ,plant, context):
 
     current_poses = get_cube_poses(plant=plant, context=context,cubes_names=cube_names)
@@ -644,6 +637,112 @@ def pick_and_place(final_configuration, cube_names ,plant, context):
 
     return operations
 
+# algorithm to check contradition in consytraints given by the user
+def creates_cycle(constraints, top, bottom):
+    """
+    Check whether adding (top on bottom) would create a cycle.
+    This is done by seeing if 'bottom' is already reachable from 'top'.
+    """
+    stack = [top]
+    visited = set()
+
+    while stack:
+        current = stack.pop()
+        if current == bottom:
+            return True  # cycle detected
+        visited.add(current)
+
+        # Explore cubes that depend on the current cube
+        stack += [
+            t for t, b in constraints
+            if b == current and t not in visited
+        ]
+
+    return False
+
+# interactive stacking constraints translator
+def target_stacking(colors):
+    """
+    Interactively builds stacking constraints and computes
+    a valid stacking order using topological sorting.
+    """
+
+    # Static variable to store constraints across function calls
+    if not hasattr(target_stacking, "constraints"):
+        target_stacking.constraints = []
+    if not hasattr(target_stacking, "default_order"):
+        target_stacking.default_order = [c + "_link" for c in colors]
+
+    
+
+    user_input = input().strip()
+    desired_order = [[], [True]]
+
+    # Exit conditions
+    if user_input.lower() == "none":
+        desired_order[0] = target_stacking.default_order
+        print("Final stacking order (bottom → top):")
+        print(desired_order[0])
+        desired_order[1] = False
+        return desired_order
+    elif user_input.lower() == "end":
+        desired_order[1] = False
+    
+    else:
+        # Parse user input
+        tokens = user_input.split("?")[:-1]
+        if len(tokens) != 3:
+            print("Invalid constraint syntax")
+            return desired_order
+        top, bottom = tokens[1], tokens[2]
+
+        if top not in colors or bottom not in colors:
+            print("Invalid 1st or 2nd color name")
+            return desired_order
+
+        # Check for contradictions
+        if creates_cycle(target_stacking.constraints, top, bottom):
+            print("Contradictory constraint detected :-( please restart.")
+            target_stacking.constraints = []
+            return desired_order
+
+        # Constraint is valid → store it
+        target_stacking.constraints.append((top, bottom))
+
+
+    # Build dependency graph
+    graph = defaultdict(list)
+    indegree = {c: 0 for c in colors}
+
+    for t, b in target_stacking.constraints:
+        graph[b].append(t)
+        indegree[t] += 1
+
+    # Only cubes that appear in constraints are considered
+    constrained = {c for pair in target_stacking.constraints for c in pair}
+
+    queue = deque(c for c in constrained if indegree[c] == 0)
+
+    # TOPOLOGICAL SORT (KAHN)
+    while queue:
+        cube = queue.popleft()
+        desired_order[0].append(cube + "_link")
+
+        for dependent in graph[cube]:
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                queue.append(dependent)
+
+    # final consistency check
+    if len(desired_order[0]) > len(colors):
+        print("Conflicting constraints detected :-( please restart.")
+        target_stacking.constraints = []
+        return [[], [True]]
+
+    print("Final stacking order (bottom → top):")
+    print(desired_order[0])
+    return desired_order
+
 ######################################################################################################
 #                     ########Function to Create Simulation Scene #######
 ######################################################################################################
@@ -678,21 +777,41 @@ def create_sim_scene(sim_time_step):
     
 
     
-    # cube on the scene
-    cubes = ["red_link", "green_link", "blue_link"]
+    #define cube  names as in the SDF file
+    cubes = ["blue_link","green_link","red_link"]
 
-    # final configuration of the cubes (from bottom to top)
-    desired_order = ["green_link","red_link","blue_link" ]
+    #get the desired stacking cylinder position
+    cylinder_target_body = plant.GetBodyByName("link_target",plant.GetModelInstanceByName("cylinder_target"))
+    X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
+    
+    #define cubes color for user
+    colors = ["red", "green", "blue"]
+    
+    #instruction message for the user
+    print("available cubes color:", *(c for c in colors))
+    print("Enter stacking constraints as: on?(A)?(B)")
+    print("Meaning: cube A must be placed on top of cube B")
+    print("Enter 'none' for default stacking order")
+    print("Enter 'end' once you are done with all constraints")
+
+    # Interactive loop
+    out = True
+    order = []
+    while out:
+        order , out = target_stacking(colors)
+        if out:
+            print("Enter the new constraint on the same format")
+
 
     # fixe target cylinder
     X_WB_circle = plant.EvalBodyPoseInWorld(context, plant.GetBodyByName("link_target", plant.GetModelInstanceByName("cylinder_target")))
 
     final_configuration = {}
-    for i, cube_name in enumerate(desired_order):
+    for i, cube_name in enumerate(order):
         height = 0.167 + (i) * 0.025  # minimum  height on the table + stack height
         final_configuration[cube_name] = RigidTransform(RotationMatrix.Identity(),[X_WB_circle.translation()[0], X_WB_circle.translation()[1],height])
 
-    # create a sequence that converges to the desired stack on the tagret cylinder
+    # create a sequence that converges to the desired stack on the target cylinder
     pick_place_sequence = pick_and_place(final_configuration=final_configuration,plant= plant,context= context,cube_names=cubes)
     
     # generate the pick and place sequence and apply an offset in z  + ik
@@ -714,7 +833,6 @@ def create_sim_scene(sim_time_step):
         elif pick_place_sequence[i][1] == 'place':
             way_pts.append(gripper_action(target, 0.00))
             way_pts.append(gripper_action(target, 0.04))
-        #last pt on top of the target pt to leave properly
         way_pts.append(solve_ik(panda_ik, context_panda_ik, frame_E, RigidTransform(RollPitchYaw(np.pi, 0, 0), p)))
 
 
