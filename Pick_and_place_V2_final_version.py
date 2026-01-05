@@ -808,7 +808,7 @@ def pick_and_place(desired_config, plant, context,cubes_names):
     return operations
 
 # algorithm to check contradition in consytraints given by the user
-def creates_cycle(constraints, top, bottom):
+def create_cycle(constraints, top, bottom):
     """
     Check whether adding (top on bottom) would create a cycle.
     This is done by seeing if 'bottom' is already reachable from 'top'.
@@ -871,7 +871,7 @@ def target_stacking(colors):
             return desired_order
 
         # Check for contradictions
-        if creates_cycle(target_stacking.constraints, top, bottom):
+        if create_cycle(target_stacking.constraints, top, bottom):
             print("Contradictory constraint detected :-( please restart.")
             target_stacking.constraints = []
             return desired_order
