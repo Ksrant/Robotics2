@@ -442,6 +442,7 @@ class TAMPSequencer(LeafSystem):
         
         self.tolerance = tolerance
         self.index = 0  # current task index
+        self.sequencer_on = True
 
         # Input: full plant state (positions + velocities)
         full_state_size = plant.num_positions() + plant.num_velocities()
@@ -463,57 +464,58 @@ class TAMPSequencer(LeafSystem):
         
     def update_index(self, context, discrete_state):
         """Periodically check distance to current waypoint and update index."""
-        discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0)
-        pp_done = bool(self.is_path_planner_done.Eval(context)[0])
-        if pp_done:
-            
+        if self.sequencer_on:
             discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0)
+            pp_done = bool(self.is_path_planner_done.Eval(context)[0])
+            if pp_done:
+                
+                discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0)
 
-            # --- Update local plant context from full state ---
-            full_state = self.full_state_port.Eval(context)
+                # --- Update local plant context from full state ---
+                full_state = self.full_state_port.Eval(context)
 
-            num_positions = self.plant.num_positions()
-            num_velocities = self.plant.num_velocities()
+                num_positions = self.plant.num_positions()
+                num_velocities = self.plant.num_velocities()
 
-            q_v = np.concatenate([full_state[:num_positions], full_state[num_positions:]])
-            self.plant.SetPositionsAndVelocities(self.plant_context, q_v)
+                q_v = np.concatenate([full_state[:num_positions], full_state[num_positions:]])
+                self.plant.SetPositionsAndVelocities(self.plant_context, q_v)
 
-            # --- Extract Panda joint positions ---
-            q_panda = self.plant.GetPositions(self.plant_context, self.robot)
-            
-            # --- Check distance to current task waypoint ---
-            dist = np.linalg.norm(q_panda - self.tasks[0][-1][1])  # last point in current task
-            
-            if dist <= self.tolerance:
-                cubes = get_cube_poses(self.plant,self.plant_context,self.cubes_names)# --- Extract cube poses ---
-                any_cube_moved = False
+                # --- Extract Panda joint positions ---
+                q_panda = self.plant.GetPositions(self.plant_context, self.robot)
+                
+                # --- Check distance to current task waypoint ---
+                dist = np.linalg.norm(q_panda - self.tasks[0][-1][1])  # last point in current task
+                
+                if dist <= self.tolerance:
+                    cubes = get_cube_poses(self.plant,self.plant_context,self.cubes_names)# --- Extract cube poses ---
+                    any_cube_moved = False
 
-                for cube_name, X_WC in cubes.items():
-                    cube_position = X_WC.translation()
-                    if cube_name not in self.prev_cube_pose:
-                        self.prev_cube_pose[cube_name] = cube_position
-                        continue
-                    if np.linalg.norm(cube_position - self.prev_cube_pose[cube_name]) > 1e-3:
-                        any_cube_moved = True
-                        self.prev_cube_pose[cube_name] = cube_position
+                    for cube_name, X_WC in cubes.items():
+                        cube_position = X_WC.translation()
+                        if cube_name not in self.prev_cube_pose:
+                            self.prev_cube_pose[cube_name] = cube_position
+                            continue
+                        if np.linalg.norm(cube_position - self.prev_cube_pose[cube_name]) > 1e-2:
+                            any_cube_moved = True
+                            self.prev_cube_pose[cube_name] = cube_position
 
-                if not any_cube_moved:
-                        self.waypoints = pick_and_place(self.final_configuration, self.plant, self.plant_context,self.cubes_names)# we recompute the sequences
-                        new_tasks = self.make_task(self.waypoints) # we make only the fist task 
-                        pp_done = False
-                        if len(new_tasks[0]) !=0 :
-                            self.tasks = new_tasks
-                            discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 1.0) # we tell to the path planner that a new task is comming
-                            self.index += 1
-                            print(f"[SEQ] Updated task index: {self.index}")
-                        else:
-                            discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0) # nothing to send to the path planner 
+                    if not any_cube_moved:
+                            self.waypoints = pick_and_place(self.final_configuration, self.plant, self.plant_context,self.cubes_names)# we recompute the sequences
+                            new_tasks = self.make_task(self.waypoints) # we make only the fist task 
+                            if len(new_tasks[0]) !=0 :
+                                self.tasks = new_tasks
+                                discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 1.0) # we tell to the path planner that a new task is comming
+                                self.index += 1
+                                print(f"[SEQ] Updated task index: {self.index}")
+                            else:
+                                discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0) # nothing to send to the path planner 
+                                self.sequencer_on = False
+                                print(f"[SEQ] all tasks done")
 
 
     def calc_output(self, context, output):
         """Flatten current task into output vector."""
         task = []
-        #task_waypoints = self.tasks[self.index]
         task_waypoints = self.tasks[0]
         if len(task_waypoints)>0:
             for pt in task_waypoints:
@@ -532,6 +534,7 @@ class TAMPSequencer(LeafSystem):
         res = [[]]
         offset = 0.1
         if len(pick_and_place_pts) > 1:
+            # --- pick ---
             X = pick_and_place_pts[0][2] 
             p = X.translation().copy()
             p[2] += offset
@@ -544,7 +547,7 @@ class TAMPSequencer(LeafSystem):
             
             res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
                                                 self.frame_E, RigidTransform(X.rotation(), p))))
-            # --- PLACE ---
+            # --- palce ---
             X = pick_and_place_pts[1][2]
             p = X.translation().copy()
             p[2] += offset
@@ -671,26 +674,39 @@ def solve_ik(plant, context, frame_E, X_WE_desired):
         print("IK did not converge!")
         return None
 
+
+
 # get the position of cubes on the world
-def get_cube_poses(plant, context,cubes_names):
-    
+def get_cube_poses(plant, context, cubes_names):
+    """
+    Compute grasp poses for each cube in the world.
+
+    Args:
+        plant: MultibodyPlant
+        context: Plant context
+        cubes_names: List of cube body names
+
+    Returns:
+        poses: Dictionary {cube_name: RigidTransform}
+    """
+
     poses = {}
 
-    for link_name in cubes_names:
-        body = plant.GetBodyByName(link_name)
-        X_WB = plant.EvalBodyPoseInWorld(context, body)
-        p = X_WB.translation().copy()
-        # to take into account the size of the table
-        
-        if p[0] <=  0.4/2 + 0.55 and p[0] >=  0.55 - 0.4/2 and  np.abs(p[1])<0.75/2:
-            p[2] += 0.105
-        else:
-            p[2] += 0.035
-        R = RotationMatrix(RollPitchYaw(np.pi,0,0))
-        #if np.abs(p[1]) < 0.2:
-        #   R = RotationMatrix(RollPitchYaw(np.pi,0,np.pi/2))
-        poses[link_name] = RigidTransform(R, p)
+    for cube_name in cubes_names:
+        body = plant.GetBodyByName(cube_name)
 
+        # Current cube pose in world frame
+        X_WB = plant.EvalBodyPoseInWorld(context, body)
+
+        # Translate grasp point slightly above the cube
+        p_W = X_WB.translation().copy()
+        p_W[2] += 0.105  # Vertical grasp offset
+
+        # Flip gripper orientation (180° around X-axis)
+        poses[cube_name] = RigidTransform(
+            RollPitchYaw(np.pi, 0, 0),
+            p_W
+        )
 
     return poses
 
@@ -701,7 +717,7 @@ def pick_and_place(desired_config, plant, context,cubes_names):
     current_poses = get_cube_poses(plant, context,cubes_names)
     # edit the final configuration to adapte it to incertaintys
     for key in list(final_configuration.keys()):
-        if np.linalg.norm(current_poses[key].translation() -final_configuration[key].translation()) < 0.0075:
+        if np.linalg.norm(current_poses[key].translation() -final_configuration[key].translation()) < 1e-2:
             #we concider that the cube is placed.
             final_configuration.pop(key)
             current_poses.pop(key)
@@ -738,8 +754,8 @@ def pick_and_place(desired_config, plant, context,cubes_names):
 
             other_pos = other_pose.translation()
             # Si un cube est au-dessus (même XY, Z plus grand)
-            if (abs(current_pos[0] - other_pos[0]) < 0.075 and
-                    abs(current_pos[1] - other_pos[1]) < 0.075 and
+            if (abs(current_pos[0] - other_pos[0]) < 0.05 and
+                    abs(current_pos[1] - other_pos[1]) < 0.05 and
                     other_pos[2] > current_pos[2]):
                 blocker = other
                 break
