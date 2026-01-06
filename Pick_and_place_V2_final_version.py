@@ -26,6 +26,7 @@ from pydrake.all import (InverseKinematics, Solve,SpatialInertia, UnitInertia,Ri
 from pydrake.systems.framework import LeafSystem, BasicVector
 from pydrake.trajectories import PiecewisePolynomial
 from collections import defaultdict, deque
+from pydrake.multibody.tree import BodyIndex
 
 # Start the visualizer and clean up previous instances
 meshcat = StartMeshcat()
@@ -860,7 +861,7 @@ def target_stacking(colors):
     
     else:
         # Parse user input
-        tokens = user_input.split("?")[:-1]
+        tokens = user_input.split("?")
         if len(tokens) != 3:
             print("Invalid constraint syntax")
             return desired_order
@@ -936,15 +937,19 @@ def create_sim_scene(sim_time_step):
     # Add visualization to see the geometries in MeshCat
     AddDefaultVisualization(builder=builder, meshcat=meshcat)
     
-    #define cube  names as in the SDF file
-    cubes = ["blue_link","green_link","red_link"]
 
     #get the desired stacking cylinder position
     cylinder_target_body = plant.GetBodyByName("link_target",plant.GetModelInstanceByName("cylinder_target"))
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
     
     #define cubes color for user
-    colors = ["red", "green", "blue"]
+    colors = []
+    for index in range(plant.num_bodies()):
+        body = plant.get_body(BodyIndex(index))
+        model_name = plant.GetModelInstanceName(body.model_instance())
+        if "_cube" in model_name:
+            colors.append(body.name().split("_link")[0])
+    cubes = [color + "_link" for color in colors]
     
     #instruction message for the user
     print("available cubes color:", *(c for c in colors))
