@@ -18,6 +18,7 @@ from pydrake.systems.framework import LeafSystem
 from pydrake.systems.primitives import ConstantVectorSource, LogVectorOutput
 from pydrake.all import Variable, MakeVectorVariable
 from collections import defaultdict, deque
+from pydrake.multibody.tree import BodyIndex
 
 from helper.dynamics import CalcRobotDynamics
 from pydrake.all import (
@@ -691,7 +692,7 @@ def target_stacking(colors):
     
     else:
         # Parse user input
-        tokens = user_input.split("?")[:-1]
+        tokens = user_input.split("?")
         if len(tokens) != 3:
             print("Invalid constraint syntax")
             return desired_order
@@ -786,7 +787,13 @@ def create_sim_scene(sim_time_step):
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
     
     #define cubes color for user
-    colors = ["red", "green", "blue"]
+    colors = []
+    for index in range(plant.num_bodies()):
+        body = plant.get_body(BodyIndex(index))
+        model_name = plant.GetModelInstanceName(body.model_instance())
+        if "_cube" in model_name:
+            colors.append(body.name().split("_link")[0])
+    cubes = [color + "_link" for color in colors]
     
     #instruction message for the user
     print("available cubes color:", *(c for c in colors))
