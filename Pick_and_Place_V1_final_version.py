@@ -514,7 +514,7 @@ def get_cube_poses(plant, context, cubes_names):
 
         # Translate grasp point slightly above the cube
         p_W = X_WB.translation().copy()
-        p_W[2] += 0.1  # Vertical grasp offset
+        p_W[2] += 0.105  # Vertical grasp offset
 
         # Flip gripper orientation (180° around X-axis)
         poses[cube_name] = RigidTransform(
@@ -554,23 +554,34 @@ def gripper_action(pt, offset):
     return p
 
 #Pick and place sequence generator 
-def pick_and_place(final_configuration, cube_names ,plant, context):
+def pick_and_place(desired_config, plant, context,cubes_names):
 
-    current_poses = get_cube_poses(plant=plant, context=context,cubes_names=cube_names)
+    final_configuration = desired_config.copy()
+    current_poses = get_cube_poses(plant, context,cubes_names)
+
+    #edit the final configuration to adapte it to incertaintys
+    #first look at which cube is already well placed
+
+    for key in list(final_configuration.keys()):
+        if np.linalg.norm(current_poses[key].translation().copy() -final_configuration[key].translation()) < 0.0075:
+            #we concider that the cube is placed.
+            final_configuration.pop(key)
+            current_poses.pop(key)
+
     operations = []
-
+    
     # Paramètres zone intermédiaire
     intermediate_amount = 0
-    m, n = 0.075, 0.075
-    intermediate_x_pattern = [1, -1, 0, 0, -1, 1, 1, 0]
-    intermediate_y_pattern = [0, 0, 1, -1, 1, 1, -1, -1]
+    n,m = 0.075, 0.075
+    intermediate_x_pattern = [-1,-1, 1,1,0]
+    intermediate_y_pattern = [ 0, 1, 1 ,0,1]
 
     # On crée une liste des cubes à placer (dans l'ordre du bas vers le haut)
     # final_configuration doit être ordonnée : [cube_bas, cube_milieu, cube_haut]
     cubes_to_place = list(final_configuration.keys())
-
     while cubes_to_place:
         # On essaie de placer le prochain cube nécessaire pour la tour finale
+
         target_cube = cubes_to_place[0]
 
         sorted_cubes = sorted(current_poses.keys(),
@@ -588,25 +599,23 @@ def pick_and_place(final_configuration, cube_names ,plant, context):
 
             other_pos = other_pose.translation()
             # Si un cube est au-dessus (même XY, Z plus grand)
-            if (abs(current_pos[0] - other_pos[0]) < 0.05 and
-                    abs(current_pos[1] - other_pos[1]) < 0.05 and
+            if (abs(current_pos[0] - other_pos[0]) < 0.075 and
+                    abs(current_pos[1] - other_pos[1]) < 0.075 and
                     other_pos[2] > current_pos[2]):
                 blocker = other
                 break
 
         if blocker is None:
-
+            
             # Le cube est libre, on l'envoie direct à sa position finale
             actual_pos_in_memory = current_poses[target_cube].translation()
             pick_z = actual_pos_in_memory.copy()
-            if pick_z[2] < 0.167:
-                pick_z[2] = 0.167
+            
 
-            operations.append((target_cube, "pick", RigidTransform(RollPitchYaw(np.pi, 0, 0), pick_z)))
+            operations.append((target_cube, "pick", RigidTransform(current_poses[target_cube].rotation(), pick_z)))
             dest_pos1 = final_configuration[target_cube].translation()
             dest_pos = dest_pos1.copy()
-            if dest_pos[2] < 0.167:
-                dest_pos[2] = 0.167
+
 
             operations.append((target_cube, "place",RigidTransform(RollPitchYaw(np.pi, 0, 0), dest_pos)))
 
@@ -618,25 +627,39 @@ def pick_and_place(final_configuration, cube_names ,plant, context):
             # Le cube voulu est bloqué par 'blocker ' ==> on doit donc dégager le 'blocker' vers une pos intermediaire
 
             blocker_pick_z = current_poses[blocker].translation().copy()
-            if blocker_pick_z[2] < 0.167:
-                blocker_pick_z[2] = 0.167
-
-            operations.append((blocker, "pick", RigidTransform(RollPitchYaw(np.pi, 0, 0), blocker_pick_z)))
+            
+            operations.append((blocker, "pick", RigidTransform(current_poses[blocker].rotation(), blocker_pick_z)))
 
             # Calcul position intermédiaire
-            pos_in_cycle = intermediate_amount % 8
-            scale = (intermediate_amount // 8) + 1
-            inter_trans = [
-                0.5 + intermediate_x_pattern[pos_in_cycle] * scale * n,  # Offset 0.3 pour éloigner de la tour
-                0.2 + intermediate_y_pattern[pos_in_cycle] * scale * m,
-                0.167 ]
+            while True:
+                pos_in_cycle = intermediate_amount % 5
+                scale = (intermediate_amount // 5) + 1
 
-            inter_pose = RigidTransform(RollPitchYaw(np.pi, 0, 0), inter_trans)
+                inter_trans = np.array([
+                    blocker_pick_z[0] + intermediate_x_pattern[pos_in_cycle] * scale * n,
+                    blocker_pick_z[1] + intermediate_y_pattern[pos_in_cycle] * scale * m,
+                    0.1675
+                ])
+
+                occupied = False
+                for pose in current_poses.values():
+                    if np.linalg.norm(pose.translation() - inter_trans) < 0.04  :
+                        occupied = True
+                        break
+                    # take into accont the table size
+                    if inter_trans[0] < 0.55 - 0.4/2 or inter_trans[0] > 0.55 + 0.4/2 or abs(inter_trans[1]) > 0.75/2 :
+                        occupied = True
+                        break
+
+                if not occupied:
+                    break
+
+                intermediate_amount += 1
+            inter_ori = RotationMatrix(RollPitchYaw(np.pi,0,0))
+            inter_pose = RigidTransform(inter_ori, inter_trans)
             operations.append((blocker, "place", inter_pose))
             current_poses[blocker] = inter_pose
             intermediate_amount += 1
-
-
     return operations
 
 # algorithm to check contradition in consytraints given by the user
@@ -778,6 +801,10 @@ def create_sim_scene(sim_time_step):
     context_panda_ik = panda_ik.CreateDefaultContext()
     
 
+    
+    #define cube  names as in the SDF file
+    cubes = ["blue_link","green_link","red_link"]
+
     #get the desired stacking cylinder position
     cylinder_target_body = plant.GetBodyByName("link_target",plant.GetModelInstanceByName("cylinder_target"))
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
@@ -814,10 +841,10 @@ def create_sim_scene(sim_time_step):
     for i, cube_name in enumerate(order):
         height = 0.167 + (i) * 0.025  # minimum  height on the table + stack height
         final_configuration[cube_name] = RigidTransform(RotationMatrix.Identity(),[X_WB_circle.translation()[0], X_WB_circle.translation()[1],height])
-
+    #print(final_configuration)
     # create a sequence that converges to the desired stack on the target cylinder
-    pick_place_sequence = pick_and_place(final_configuration=final_configuration,plant= plant,context= context,cube_names=cubes)
-    
+    pick_place_sequence = pick_and_place(desired_config=final_configuration,plant=plant,context= context,cubes_names=cubes)
+    #print(pick_place_sequence)
     # generate the pick and place sequence and apply an offset in z  + ik
     way_pts = []
     offset = 0.1
@@ -887,7 +914,7 @@ def run_simulation(sim_time_step):
 
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(45.0)  # Adjust this time as needed
+    simulator.AdvanceTo(100.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
@@ -898,4 +925,3 @@ def run_simulation(sim_time_step):
 run_simulation(sim_time_step=0.0005)
 
 ######################################################################################################
-
