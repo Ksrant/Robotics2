@@ -778,10 +778,6 @@ def create_sim_scene(sim_time_step):
     context_panda_ik = panda_ik.CreateDefaultContext()
     
 
-    
-    #define cube  names as in the SDF file
-    cubes = ["blue_link","green_link","red_link"]
-
     #get the desired stacking cylinder position
     cylinder_target_body = plant.GetBodyByName("link_target",plant.GetModelInstanceByName("cylinder_target"))
     X_WB_circle = plant.EvalBodyPoseInWorld(context, cylinder_target_body)
