@@ -52,8 +52,10 @@ class Controller(LeafSystem):
         self._desired_state_port = self.DeclareVectorInputPort(name="Desired_state", size=9)
 
         # PD+G gains (Kp and Kd)
-        self.Kp_ = np.array([120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120, 120])
-        self.Kd_ = np.array([30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 5, 5])
+        # self.Kp_ = np.array([120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120, 120])
+        self.Kp_ = np.array([130.0, 120.0, 110.0, 100.0, 70.0, 45.0, 15.0, 120.0, 120.0])
+        # self.Kd_ = np.array([30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30, 30])
+        self.Kd_ =  np.array([22,22,21, 20,16, 13, 8, 20,  20])
         self.robot = robot
 
         # Store plant and context for dynamics calculations
