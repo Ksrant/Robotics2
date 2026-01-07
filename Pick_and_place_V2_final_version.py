@@ -490,7 +490,7 @@ class TAMPSequencer(LeafSystem):
                 dist = np.linalg.norm(q_panda - self.tasks[0][-1][1])
                 
                 if dist <= self.tolerance:
-                    # Check if any cube still moving a lot  moved (velocity <= 1e-2)
+                    # Check if any cube has moved
                     cubes = get_cube_poses(self.plant, self.plant_context, self.cubes_names)
                     any_cube_moved = False
 
@@ -723,27 +723,29 @@ def pick_and_place(desired_config, plant, context,cubes_names):
 
     final_configuration = desired_config.copy()
     current_poses = get_cube_poses(plant, context,cubes_names)
-    # edit the final configuration to adapte it to incertaintys
+
+    # Edit the final configuration to adapt it to uncertainties
+    # First, check which cube is already well placed
+
     for key in list(final_configuration.keys()):
-        if np.linalg.norm(current_poses[key].translation() -final_configuration[key].translation()) < 1e-2:
-            #we concider that the cube is placed.
+        if np.linalg.norm(current_poses[key].translation().copy() -final_configuration[key].translation()) < 0.0075:
+            # Consider the cube as already placed
             final_configuration.pop(key)
             current_poses.pop(key)
 
     operations = []
     
-    # Paramètres zone intermédiaire
+    # Intermediate zone parameters
     intermediate_amount = 0
     n,m = 0.075, 0.075
     intermediate_x_pattern = [-1,-1, 1,1,0]
     intermediate_y_pattern = [ 0, 1, 1 ,0,1]
 
-    # On crée une liste des cubes à placer (dans l'ordre du bas vers le haut)
-    # final_configuration doit être ordonnée : [cube_bas, cube_milieu, cube_haut]
+    # Create a list of cubes to place (from bottom to top)
+    # final_configuration must be ordered: [bottom_cube, middle_cube, top_cube]
     cubes_to_place = list(final_configuration.keys())
-
     while cubes_to_place:
-        # On essaie de placer le prochain cube nécessaire pour la tour finale
+        # Try to place the next cube required for the final tower
 
         target_cube = cubes_to_place[0]
 
@@ -751,7 +753,7 @@ def pick_and_place(desired_config, plant, context,cubes_names):
             key=lambda c: current_poses[c].translation()[2],
             reverse=True)
 
-        # 1. Est-ce que target_cube est libre (rien au-dessus) ?
+        # 1. Is the target_cube free (nothing on top)?
         current_pos = current_poses[target_cube].translation()
         blocker = None
         for other in sorted_cubes:
@@ -761,39 +763,37 @@ def pick_and_place(desired_config, plant, context,cubes_names):
                 continue
 
             other_pos = other_pose.translation()
-            # Si un cube est au-dessus (même XY, Z plus grand)
-            if (abs(current_pos[0] - other_pos[0]) < 0.05 and
-                    abs(current_pos[1] - other_pos[1]) < 0.05 and
+            # If a cube is above (same XY, higher Z)
+            if (abs(current_pos[0] - other_pos[0]) < 0.075 and
+                    abs(current_pos[1] - other_pos[1]) < 0.075 and
                     other_pos[2] > current_pos[2]):
                 blocker = other
                 break
 
         if blocker is None:
-
-            # Le cube est libre, on l'envoie direct à sa position finale
+            
+            # The cube is free, send it directly to its final position
             actual_pos_in_memory = current_poses[target_cube].translation()
             pick_z = actual_pos_in_memory.copy()
             
-
             operations.append((target_cube, "pick", RigidTransform(current_poses[target_cube].rotation(), pick_z)))
             dest_pos1 = final_configuration[target_cube].translation()
             dest_pos = dest_pos1.copy()
-            
 
             operations.append((target_cube, "place",RigidTransform(RollPitchYaw(np.pi, 0, 0), dest_pos)))
 
-            # Mise à jour
+            # Update
             current_poses[target_cube] = final_configuration[target_cube]
-            cubes_to_place.pop(0)  # On passe au cube suivant de la tour finale
+            cubes_to_place.pop(0)  # Move to the next cube in the final tower
 
         else:
-            # Le cube voulu est bloqué par 'blocker ' ==> on doit donc dégager le 'blocker' vers une pos intermediaire
+            # The desired cube is blocked by 'blocker' ==> we must move 'blocker' to an intermediate position
 
             blocker_pick_z = current_poses[blocker].translation().copy()
-
+            
             operations.append((blocker, "pick", RigidTransform(current_poses[blocker].rotation(), blocker_pick_z)))
 
-            # Calcul position intermédiaire
+            # Compute intermediate position
             while True:
                 pos_in_cycle = intermediate_amount % 5
                 scale = (intermediate_amount // 5) + 1
@@ -809,7 +809,7 @@ def pick_and_place(desired_config, plant, context,cubes_names):
                     if np.linalg.norm(pose.translation() - inter_trans) < 0.04  :
                         occupied = True
                         break
-                    # take into accont the table size
+                    # Take into account the table size
                     if inter_trans[0] < 0.55 - 0.4/2 or inter_trans[0] > 0.55 + 0.4/2 or abs(inter_trans[1]) > 0.75/2 :
                         occupied = True
                         break
@@ -819,17 +819,10 @@ def pick_and_place(desired_config, plant, context,cubes_names):
 
                 intermediate_amount += 1
             inter_ori = RotationMatrix(RollPitchYaw(np.pi,0,0))
-            """
-            if abs(inter_trans[1]) < 0.5 :
-                inter_ori = RotationMatrix(RollPitchYaw(np.pi,0,np.pi/2))
-            else:
-                inter_ori = RotationMatrix(RollPitchYaw(np.pi,0,0))
-            """
             inter_pose = RigidTransform(inter_ori, inter_trans)
             operations.append((blocker, "place", inter_pose))
             current_poses[blocker] = inter_pose
             intermediate_amount += 1
-
     return operations
 
 # algorithm to check contradition in consytraints given by the user
