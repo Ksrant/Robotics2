@@ -1,3 +1,7 @@
+############################################################################################################################
+#This script simulates a Franka Panda robot performing task-and-motion planning with OMPL, Drake, and MeshCat visualization.
+#****************************************************************************************************************************
+
 import os
 import numpy as np
 from ompl import base as ob
@@ -50,12 +54,9 @@ class Controller(LeafSystem):
         self._desired_state_port = self.DeclareVectorInputPort(name="Desired_state", size=9)
 
         # PD+G gains (Kp and Kd)
-        # self.Kp_ = np.array([120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120, 120])
-        self.Kp_ = np.array([130.0, 120.0, 110.0, 100.0, 70.0, 45.0, 15.0, 120.0, 120.0])
-
-        # self.Kd_ = np.array([30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30, 30])
-        self.Kd_ =  [22,22,21, 20,16, 13, 8, 20,  20]
         
+        self.Kp_ = np.array([130.0, 120.0, 110.0, 100.0, 70.0, 45.0, 15.0, 120.0, 120.0])
+        self.Kd_ =  [22,22,21, 20,16, 13, 8, 20,  20]        
         self.robot = robot
 
         # Store plant and context for dynamics calculations
@@ -417,81 +418,80 @@ class TAMPSequencer(LeafSystem):
     Accepts the full plant state and extracts Panda + cubes in real-time.
     """
 
-    def __init__(self, panda_ik, plant,desired_order,X_WB_target,cube_names, update_period=1/50, tolerance=0.3):
+    def __init__(self, panda_ik, plant, desired_order, X_WB_target, cube_names, update_period=1/50, tolerance=0.3):
         super().__init__()
 
-        # Plant and IK
+        # Plant and IK setup 
         self.plant = plant
-        self.plant_context = plant.CreateDefaultContext() # Local plant context for real-time extraction
+        self.plant_context = plant.CreateDefaultContext()  # Local context for real-time state extraction
         self.panda_ik = panda_ik
         self.context_panda_ik = panda_ik.CreateDefaultContext()
-        self.frame_E = panda_ik.GetFrameByName("panda_hand")
+        self.frame_E = panda_ik.GetFrameByName("panda_hand")  # end-effector frame
         self.robot = plant.GetModelInstanceByName("panda")
         self.num_joints = plant.num_positions(self.robot)
 
-        # Task setup
-        self.desired_order = desired_order
-        self.X_WB_target = X_WB_target
-        self.prev_cube_pose = {}
+        # Task setup 
+        self.desired_order = desired_order  # target stacking order of cubes
+        self.X_WB_target = X_WB_target      # base pose for final stack
+        self.prev_cube_pose = {}            # store previous cube positions for movement detection
         self.cubes_names = cube_names
-        #--------------init---------------------------------------------------------------------------------
+        # Initialize final configuration for each cube (stack height)
         self.final_configuration = {}
         for i, cube_name in enumerate(self.desired_order):
             height = 0.1675 + (i)*0.025  
-            self.final_configuration[cube_name] = RigidTransform(RollPitchYaw(np.pi, 0, 0), [self.X_WB_target.translation()[0], self.X_WB_target.translation()[1], height])
-        self.waypoints = pick_and_place(self.final_configuration, self.plant, self.plant_context,self.cubes_names)
-        self.tasks = self.make_task(self.waypoints)
+            self.final_configuration[cube_name] = RigidTransform(
+                RollPitchYaw(np.pi, 0, 0), 
+                [self.X_WB_target.translation()[0], 
+                 self.X_WB_target.translation()[1], 
+                 height]
+            )
+        # Compute initial pick-and-place waypoints
+        self.waypoints = pick_and_place(self.final_configuration, self.plant, self.plant_context, self.cubes_names)
+        self.tasks = self.make_task(self.waypoints)  # convert waypoints to sequencer task format
         self.num_waypoints_per_task = len(self.tasks[0])
-        #----------------------------------------------------------------------------------------------------
         
-        self.tolerance = tolerance
-        self.index = 0  # current task index
-        self.sequencer_on = True
+        self.tolerance = tolerance  # distance threshold to switch waypoints
+        self.index = 0              # current task index
+        self.sequencer_on = True    # flag to enable/disable sequencer
 
-        # Input: full plant state (positions + velocities)
+        # Input ports 
         full_state_size = plant.num_positions() + plant.num_velocities()
-        self.full_state_port = self.DeclareVectorInputPort("full_state", size=full_state_size)
-        
-        # Input: path planner done flag
-        self.is_path_planner_done = self.DeclareVectorInputPort("path_planner_done", size=1)
+        self.full_state_port = self.DeclareVectorInputPort("full_state", size=full_state_size)  # full plant state
+        self.is_path_planner_done = self.DeclareVectorInputPort("path_planner_done", size=1)  # planner ready flag
 
-        # Output: current task flattened
-        self.DeclareVectorOutputPort("task_d",self.num_joints * self.num_waypoints_per_task,self.calc_output)
-
-        # Output: new task flag for path planner
-        self.new_task = self.DeclareDiscreteState(1)
+        # Output ports 
+        self.DeclareVectorOutputPort("task_d", self.num_joints * self.num_waypoints_per_task, self.calc_output)
+        self.new_task = self.DeclareDiscreteState(1)  # flag for new task
         self.DeclareStateOutputPort("new_task", self.new_task)
 
-        # Periodic event to update task index
-        self.DeclarePeriodicDiscreteUpdateEvent(period_sec=update_period,offset_sec=0.0,update=self.update_index)
+        # Periodic event 
+        self.DeclarePeriodicDiscreteUpdateEvent(
+            period_sec=update_period, offset_sec=0.0, update=self.update_index
+        )
 
-        
     def update_index(self, context, discrete_state):
         """Periodically check distance to current waypoint and update index."""
         if self.sequencer_on:
             discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0)
-            pp_done = bool(self.is_path_planner_done.Eval(context)[0])
+            pp_done = bool(self.is_path_planner_done.Eval(context)[0])  # check if planner finished
+
             if pp_done:
-                
-                discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0)
-
-                # --- Update local plant context from full state ---
+                # Update plant with current full state
                 full_state = self.full_state_port.Eval(context)
-
                 num_positions = self.plant.num_positions()
                 num_velocities = self.plant.num_velocities()
-
                 q_v = np.concatenate([full_state[:num_positions], full_state[num_positions:]])
                 self.plant.SetPositionsAndVelocities(self.plant_context, q_v)
 
-                # --- Extract Panda joint positions ---
+                # Extract Panda joint positions
                 q_panda = self.plant.GetPositions(self.plant_context, self.robot)
                 
-                # --- Check distance to current task waypoint ---
-                dist = np.linalg.norm(q_panda - self.tasks[0][-1][1])  # last point in current task
+                # Distance to last waypoint in current task
+                dist = np.linalg.norm(q_panda - self.tasks[0][-1][1])
                 
                 if dist <= self.tolerance:
-                    cubes = get_cube_poses(self.plant,self.plant_context,self.cubes_names)# --- Extract cube poses ---
+                    # Check if any cube still moving a lot  moved (velocity <= 1e-2)
+                    cubes = get_cube_poses(self.plant, self.plant_context, self.cubes_names)
                     any_cube_moved = False
 
                     for cube_name, X_WC in cubes.items():
@@ -503,42 +503,45 @@ class TAMPSequencer(LeafSystem):
                             any_cube_moved = True
                             self.prev_cube_pose[cube_name] = cube_position
 
+                    #Update task if cubes stable
                     if not any_cube_moved:
-                            self.waypoints = pick_and_place(self.final_configuration, self.plant, self.plant_context,self.cubes_names)# we recompute the sequences
-                            new_tasks = self.make_task(self.waypoints) # we make only the fist task 
-                            if len(new_tasks[0]) !=0 :
-                                self.tasks = new_tasks
-                                discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 1.0) # we tell to the path planner that a new task is comming
-                                self.index += 1
-                                print(f"[SEQ] Updated task index: {self.index}")
-                            else:
-                                discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0) # nothing to send to the path planner 
-                                self.sequencer_on = False
-                                print(f"[SEQ] all tasks done")
-
+                        self.waypoints = pick_and_place(
+                            self.final_configuration, self.plant, self.plant_context, self.cubes_names
+                        )
+                        new_tasks = self.make_task(self.waypoints)
+                        if len(new_tasks[0]) != 0:
+                            self.tasks = new_tasks
+                            discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 1.0)  # notify planner
+                            self.index += 1
+                            print(f"[SEQ] Updated task index: {self.index}")
+                        else:
+                            discrete_state.get_mutable_vector(self.new_task).SetAtIndex(0, 0.0)
+                            self.sequencer_on = False
+                            print(f"[SEQ] all tasks done")
 
     def calc_output(self, context, output):
-        """Flatten current task into output vector."""
+        """Flatten current task waypoints into a single output vector."""
         task = []
         task_waypoints = self.tasks[0]
-        if len(task_waypoints)>0:
+        if len(task_waypoints) > 0:
             for pt in task_waypoints:
                 task.append(pt[1])
             flat = np.concatenate(task)
             output.SetFromVector(flat)
 
     def gripper_action(self, pt, offset):
-        """Modify gripper joint values."""
+        """Set gripper joints to given offset (open/close)."""
         p = pt.copy()
         p[7] = offset
         p[8] = offset
         return p
 
     def make_task(self, pick_and_place_pts):
+        """Convert pick-and-place waypoints into sequencer task format with gripper actions."""
         res = [[]]
         offset = 0.1
         if len(pick_and_place_pts) > 1:
-            # --- pick ---
+            # pick phase 
             X = pick_and_place_pts[0][2] 
             p = X.translation().copy()
             p[2] += offset
@@ -548,10 +551,10 @@ class TAMPSequencer(LeafSystem):
                                              self.frame_E, RigidTransform(X.rotation(), p))))
             res[-1].append(('gripper_open', self.gripper_action(target_pt, 0.04)))
             res[-1].append(('gripper_close', self.gripper_action(target_pt, 0.0001)))
-            
             res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
-                                                self.frame_E, RigidTransform(X.rotation(), p))))
-            # --- palce ---
+                                             self.frame_E, RigidTransform(X.rotation(), p))))
+            
+            # place phase
             X = pick_and_place_pts[1][2]
             p = X.translation().copy()
             p[2] += offset
@@ -564,6 +567,7 @@ class TAMPSequencer(LeafSystem):
             res[-1].append(('----', solve_ik(self.panda_ik, self.context_panda_ik,
                                              self.frame_E, RigidTransform(X.rotation(), p))))
         return res
+
 
 #plot joint tracking
 def plot_joint_tracking(logger_state, logger_traj, simulator_context, num_joints=9):
