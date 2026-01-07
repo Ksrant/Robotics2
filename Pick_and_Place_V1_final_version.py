@@ -1,3 +1,8 @@
+############################################################################################################################
+#This script simulates a Franka Panda robot performing task-and-motion planning with OMPL, Drake, and MeshCat visualization.
+#****************************************************************************************************************************
+
+
 import os
 import numpy as np
 from ompl import base as ob
@@ -44,6 +49,20 @@ robot_path = os.path.join("..", "models", "descriptions", "robots", "arms",
 ######################################################################################################
 
 class Controller(LeafSystem):
+    """
+    Joint-space PD controller with gravity compensation (PD+G).
+
+    Inputs:
+        - Current_state: current joint positions and velocities (size 2*n)
+        - Desired_state: desired joint positions (size n)
+
+    Output:
+        - tau_u: torque command for each joint
+
+    Notes:
+        - Operates at 1 kHz.
+        - Gravity is computed online using the robot model.
+    """
     def __init__(self, plant, robot):
         super().__init__()
 
@@ -57,7 +76,6 @@ class Controller(LeafSystem):
         # self.Kd_ = np.array([30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 30, 30])
         self.Kd_ =  np.array([22,22,21, 20,16, 13, 8, 20,  20])
         self.robot = robot
-
         # Store plant and context for dynamics calculations
         self.plant, self.plant_context_ad = plant, plant.CreateDefaultContext()
 
@@ -103,6 +121,14 @@ class JointSpaceValidityChecker(ob.StateValidityChecker):
 ######################################################################################################
 
 class MotionProfile(LeafSystem):
+    """
+    Generates joint-space trajectory following given waypoints, avoiding collisions.
+
+    Responsibilities:
+        - Compute collision-free trajectories between waypoints using RRT-Connect
+        - Check validity of joint configurations
+        - Output desired joint commands for controller
+    """
     def __init__(self, waypoints):
         super().__init__()
 
@@ -527,25 +553,7 @@ def get_cube_poses(plant, context, cubes_names):
     return poses
 
 def gripper_action(pt, offset):
-    """
-    Modify a joint-space command vector to actuate the gripper.
-
-    This function assumes that:
-    - `pt` is a joint configuration vector (q)
-    - indices 7 and 8 correspond to the gripper finger joints
-      (e.g. Panda left and right fingers)
-    - `offset` represents the desired gripper opening/closing value
-
-    Args:
-        pt: Joint command vector (numpy array or similar).
-            Expected size >= 9.
-        offset: Scalar value applied to both gripper finger joints.
-            - Same value on both fingers ensures symmetric motion.
-
-    Returns:
-        p: New joint command vector with updated gripper joints.
-    """
-
+    """Modify gripper joint values."""
     # Copy input joint vector to avoid in-place modification
     p = pt.copy()
 
@@ -916,7 +924,7 @@ def run_simulation(sim_time_step):
 
     # Run simulation and record for replays in MeshCat
     meshcat.StartRecording()
-    simulator.AdvanceTo(100.0)  # Adjust this time as needed
+    simulator.AdvanceTo(50.0)  # Adjust this time as needed
     meshcat.PublishRecording()
 
     # At the end of the simulation
